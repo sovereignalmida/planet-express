@@ -12,7 +12,6 @@
 <section class="panel" aria-label="Record">
   <div class="panel-head-row">
     <h3>RECORD</h3>
-    {% if missions_enabled() %}<a class="status-chip" href="{{ url_for('standing_page') }}">STANDING GRANTS</a>{% endif %}
     <span class="panel-head-note">Everything PE changed or looked into, newest first: conversations and their runs, approved plans, canary updates and safe prunes</span>
   </div>
   {% if usage and usage.state != 'off' %}

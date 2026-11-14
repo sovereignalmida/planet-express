@@ -33,6 +33,7 @@ CONTAINER_ROUTERS_BACKOFF_SECONDS = 15
 # refresh together should both get links; neither may hold a worker for a docker call.
 CONTAINER_ROUTERS_WAIT_SECONDS = 0.5
 log = logging.getLogger("planetexpress.rpc")
+NEEDS_TTL_S = 3.0
 
 
 class RpcError(Exception):
@@ -947,6 +948,44 @@ def build_core_handlers(
         public = result.as_dict()
         return _PostReply(public, callback) if callback is not None else public
 
+    needs_cache = {"at": 0.0, "out": None}
+    needs_lock = threading.Lock()
+
+    def needs_list(params):
+        _params(params, {})
+        # Every dashboard page asks (the badge, the Overview): one answer serves them for a few seconds (review, 4.2).
+        with needs_lock:
+            if needs_cache["out"] is None or time.monotonic() - needs_cache["at"] > NEEDS_TTL_S:
+                needs_cache["out"], needs_cache["at"] = needs_build(), time.monotonic()
+            return needs_cache["out"]
+
+    def needs_build():
+        """NEEDS YOU, the one rule (4.2, docs/designs/missions-memory.md §5): plans waiting for approval, canary rollback windows held
+        for a human, and missions and Console conversations waiting on the operator. The NEEDS YOU badge, its page and the Overview
+        all read this; the Console's rail groups by the same grouping. `count` is None when a part could not be read: unknown,
+        never zero."""
+        out: dict[str, Any] = {"plans": None, "held_windows": None, "missions": [], "missions_readable": True,
+                               "truncated": False}
+        try:
+            out["plans"] = len(store.list_pending())
+        except Exception:  # noqa: BLE001 -- one unreadable part leaves the others standing
+            log.warning("NEEDS YOU: pending plans unreadable", exc_info=True)
+        try:
+            out["held_windows"] = sum(1 for row in store.open_rollback_candidates(time.time()) if window_held(row))
+        except Exception:  # noqa: BLE001
+            log.warning("NEEDS YOU: rollback windows unreadable", exc_info=True)
+        if missions is not None and missions.enabled():
+            try:
+                waiting = missions.needs_missions()
+                out["missions"], out["truncated"] = waiting["missions"], waiting["truncated"]
+            except Exception:  # noqa: BLE001
+                log.warning("NEEDS YOU: missions unreadable", exc_info=True)
+                out["missions_readable"] = False
+        # Missions that could not be read leave out only themselves (the page says so); unknown plans or windows make the count unknown.
+        parts = (out["plans"], out["held_windows"])
+        out["count"] = None if None in parts else sum(parts) + len(out["missions"])
+        return out
+
     from planet_express.application.record import RecordCache
     record_cache = RecordCache()
 
@@ -979,7 +1018,7 @@ def build_core_handlers(
         rows = record_cache.rows(on, build)
         return record_mod.select(rows, limit=limit, offset=offset, **filters)
 
-    handlers = {"logs.tail": logs, "approval.get": approval_get, "record.list": record_list,
+    handlers = {"logs.tail": logs, "approval.get": approval_get, "record.list": record_list, "needs.list": needs_list,
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "scan.start": scan_start,
             "pipeline.status": pipeline_status_get,

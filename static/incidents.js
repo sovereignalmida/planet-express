@@ -64,29 +64,8 @@
     }
   }
 
-  // v4 S4: hand the incident's evidence to a Propose mission (diagnosis only, nothing is changed).
-  async function investigate(item, button) {
-    if (state.submitting.has(item.id)) return;
-    if (root.dataset.console === "1") return askConsole(item, button);
-    state.submitting.add(item.id);
-    button.disabled = true;
-    message.textContent = "Opening an investigation…";
-    try {
-      const result = await request(root.dataset.api + "/" + encodeURIComponent(item.id) + "/investigate", {
-        method: "POST", body: new URLSearchParams({ csrf_token: csrf() }),
-      });
-      const id = result.mission && result.mission.id;
-      state.notice = (result.created ? "Investigation started as mission " : "Already investigating in mission ") +
-        id + ". Follow it under Missions.";
-      message.textContent = state.notice;
-    } catch (error) {
-      state.notice = error.message;
-      message.textContent = state.notice;
-    } finally {
-      state.submitting.delete(item.id);
-      if (button.isConnected) button.disabled = false;
-    }
-  }
+  // An incident on another host (multi-host) says so in the question, as the retired INVESTIGATE goal did (4.2).
+  function remoteIncident(item) { return item.kind === "remote_container" || item.kind === "remote_host"; }
 
   // With the Console on, an incident opens a conversation that already holds its evidence; nothing is changed by asking.
   async function askConsole(item, button) {
@@ -96,7 +75,9 @@
     try {
       const result = await request("/api/console/new", {
         method: "POST", body: new URLSearchParams({ csrf_token: csrf(), incident_id: item.id,
-          text: "Look into this incident and tell me what is wrong and what you would do: " + String(item.summary || item.id).slice(0, 500) }),
+          text: (remoteIncident(item)
+            ? "This incident is on ANOTHER host, which PE reads but does not change: propose nothing for this host. "
+            : "") + "Look into this incident and tell me what is wrong and what you would do: " + String(item.summary || item.id).slice(0, 500) }),
       });
       window.location.assign("/console/" + encodeURIComponent(result.id));
     } catch (error) {
@@ -164,10 +145,11 @@
       detail.append(button);
     }
 
-    if (root.dataset.missions === "1" && item.status !== "resolved") {
-      const button = node("button", "pe-btn", root.dataset.console === "1" ? "ASK THE CONSOLE" : "INVESTIGATE");
+    // 4.2: an incident is looked into in the Console. The pre-Console Propose mission (INVESTIGATE) is gone.
+    if (root.dataset.console === "1" && item.status !== "resolved") {
+      const button = node("button", "pe-btn", "ASK THE CONSOLE");
       button.type = "button";
-      button.addEventListener("click", event => { event.stopPropagation(); investigate(item, button); });
+      button.addEventListener("click", event => { event.stopPropagation(); if (!state.submitting.has(item.id)) askConsole(item, button); });
       detail.append(button);
     }
 

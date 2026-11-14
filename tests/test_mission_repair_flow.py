@@ -45,7 +45,7 @@ def test_an_approved_repair_runs_to_completion_through_core_verification(stack):
     st = stack()
     made = st.propose()
     mid = made["mission_id"]
-    assert made["status"] == "awaiting_decision" and not made["unattended"]
+    assert made["status"] == "awaiting_decision"
     assert st.drive(mid, 2) == "awaiting_decision" and st.runtimes == []        # nothing starts without an approval
     st.approve_all(mid)
     assert st.drive(mid) == "completed"

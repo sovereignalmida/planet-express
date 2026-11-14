@@ -44,7 +44,6 @@ PHASE_RE = re.compile(r"^(grant|plan|broad_sudo|no_backup|critical:\d{1,6})$")
 # grant it gives no longer hashes to the stored hash, so an approval made before the upgrade can never start a run.
 LEGACY_GRANT_KEYS = frozenset({"protected", "exclusions", "sudo", "docker", "backup", "effects"})
 LEGACY_SCOPE_KEYS = frozenset({"paths", "mounts"})
-LEGACY_CEILING_KEYS = frozenset({"sudo_units", "exclusions"})
 LEGACY_GRANT_TEXT = ("this was approved before PE's trust-mode update changed what an approval covers, so it will not run. "
                      "Close it and confirm the plan again.")
 # A failed Repair that closes `failed` because the checkpoint shows nothing changed. Only the checkpointed files and service settings
@@ -52,8 +51,6 @@ LEGACY_GRANT_TEXT = ("this was approved before PE's trust-mode update changed wh
 NOTHING_CHECKPOINTED_FLAG = "nothing_checkpointed_changed"
 KEPT_BY_OPERATOR_FLAG = "kept_by_operator"            # rc14.7: a held run whose changes the operator kept and closed (Supervisor.keep_and_close)
 NOTHING_CHECKPOINTED_TEXT = "verification failed and nothing the checkpoint covers changed"
-LEGACY_STANDING_TEXT = ("this standing grant was approved before PE's trust-mode update changed what an approval covers, so it no "
-                        "longer applies. Revoke it and make a new one.")
 
 
 class _Strict(BaseModel):
@@ -103,17 +100,6 @@ class GrantScope(_Strict):
     def load(cls, doc: Any) -> "GrantScope":
         """A stored scope (a mission's or a standing grant's): one from before trust mode may still carry paths and mounts."""
         return cls.model_validate(_without(doc, LEGACY_SCOPE_KEYS))
-
-
-class StandingCeilings(_Strict):
-    """What an unattended start under a standing grant may carry beyond its scope. Everything defaults to nothing: no brokered
-    tools and budgets no larger than `Budgets()`'s own defaults."""
-    credentials: ShortList = []              # the `tool:<name>` credentials a mission may name
-    budgets: "Budgets | None" = None         # per-field maxima; None means the model defaults
-
-    @classmethod
-    def load(cls, doc: Any) -> "StandingCeilings":
-        return cls.model_validate(_without(doc, LEGACY_CEILING_KEYS))
 
 
 class Window(_Strict):
@@ -175,20 +161,6 @@ def is_legacy_grant(text: str) -> bool:
         return False
     scope = doc.get("scope")
     return bool(LEGACY_GRANT_KEYS & set(doc)) or (isinstance(scope, dict) and bool(LEGACY_SCOPE_KEYS & set(scope)))
-
-
-def is_legacy_standing(scope_json: Any) -> bool:
-    """A stored standing grant's scope document written before trust mode: it names a scope key (paths, mounts) or a ceiling key
-    (sudo_units, exclusions) that update removed. `GrantScope.load`/`StandingCeilings.load` drop those keys, so without this check
-    a standing grant approved for a narrow sudo rule would silently cover an unattended full-access run."""
-    try:
-        doc = loads_strict(scope_json) if isinstance(scope_json, str) else scope_json
-    except Exception:                       # noqa: BLE001 - unreadable is not "legacy"; the strict reader says what is wrong
-        return False
-    if not isinstance(doc, dict):
-        return False
-    ceilings = doc.get("ceilings")
-    return bool(LEGACY_SCOPE_KEYS & set(doc)) or (isinstance(ceilings, dict) and bool(LEGACY_CEILING_KEYS & set(ceilings)))
 
 
 CheckName = Literal[
@@ -270,18 +242,6 @@ class Lease(_Strict):
     expires_at: Int
     last_heartbeat: Int
     suspect_at: Int | None = None
-
-
-class StandingGrant(_Strict):
-    id: Str
-    scope: GrantScope
-    tier: Tier
-    window: Window | None = None
-    created_by: Str
-    created_at: Int
-    expires_at: Int
-    revoked_at: Int | None = None
-    version: Int = 1
 
 
 class Approval(_Strict):

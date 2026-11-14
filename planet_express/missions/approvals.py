@@ -15,19 +15,12 @@ from planet_express.core.store import Store
 from .canonical import CanonicalError, loads_strict, sha256_hex
 from .models import (
     LEGACY_GRANT_TEXT,
-    LEGACY_STANDING_TEXT,
     PHASE_RE,
-    Budgets,
     Grant,
-    GrantScope,
-    StandingCeilings,
-    StandingGrant,
     VerificationPlan,
     is_legacy_grant,
-    is_legacy_standing,
 )
 from .verify.plan import binding_problems
-from .window import allowed as window_allowed
 
 TIER_RANK = {"observe": 0, "propose": 1, "repair": 2, "change": 3, "critical": 4}
 ELEVATED_PHASES = ("broad_sudo", "no_backup")
@@ -158,76 +151,6 @@ def has_approving_row(conn: sqlite3.Connection, mission_id: str, bound_hash: str
     ).fetchone() is not None
 
 
-def _scope_within(inner: GrantScope, outer: GrantScope) -> bool:
-    return all(set(getattr(inner, f)) <= set(getattr(outer, f))
-               for f in ("stacks", "services", "hosts", "files"))
-
-
-def standing_row_problems(row: sqlite3.Row, now: int) -> list[str]:
-    """What stops a standing grant from starting any run now, whatever the mission: its window, revocation, expiry, a scope from
-    before trust mode or one that cannot be read, a tier above repair. The Standing page shows these and `_standing_reasons` refuses
-    on them: one rule for both (rc14.7.10, state-machines.md M9)."""
-    reasons = []
-    try:
-        window = loads_strict(row["window_json"]) if row["window_json"] else None
-        ok, why = window_allowed(window, now)
-    except (CanonicalError, ValueError, AttributeError, TypeError):
-        ok, why = False, "the standing grant's window is unreadable"
-    if not ok:
-        reasons.append(f"standing grant window: {why}")
-    if row["revoked_at"] is not None:
-        reasons.append("standing grant is revoked")
-    if row["expires_at"] <= now:
-        reasons.append("standing grant is expired")
-    if is_legacy_standing(row["scope_json"]):
-        # Approved for less than a trust-mode session gets (a named sudo rule, exclusions, paths): it must not stretch to cover it.
-        return [*reasons, LEGACY_STANDING_TEXT]
-    try:
-        raw_scope = loads_strict(row["scope_json"])
-        StandingCeilings.load(raw_scope.pop("ceilings", None) or {})
-        GrantScope.load(raw_scope)
-    except (CanonicalError, ValueError, AttributeError):
-        return [*reasons, "the standing grant's scope is unreadable"]
-    if TIER_RANK.get(row["tier"], 99) > TIER_RANK["repair"]:
-        reasons.append("standing grants never cover change or critical")
-    return reasons
-
-
-def _standing_reasons(conn: sqlite3.Connection, m: sqlite3.Row, grant: Grant, now: int) -> list[str]:
-    standing_id = m["standing_grant_id"]
-    row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (standing_id,)).fetchone()
-    if row is None:
-        return ["standing grant does not exist"]
-    reasons = []
-    # Incident-backed only (brief 5.2): an unattended start answers one open incident, never a free-standing request.
-    if not m["incident_id"] or m["origin"] != "incident":
-        reasons.append("standing grants cover incident-backed missions only")
-    reasons += standing_row_problems(row, now)
-    if LEGACY_STANDING_TEXT in reasons or "the standing grant's scope is unreadable" in reasons:
-        return reasons
-    raw_scope = loads_strict(row["scope_json"])
-    ceilings = StandingCeilings.load(raw_scope.pop("ceilings", None) or {})
-    scope = GrantScope.load(raw_scope)
-    sg = StandingGrant(id=row["id"], scope=scope,
-                       tier=row["tier"], created_by=row["created_by"], created_at=row["created_at"],
-                       expires_at=row["expires_at"], revoked_at=row["revoked_at"], version=row["version"])
-    if TIER_RANK[grant.tier] > TIER_RANK["repair"] and "standing grants never cover change or critical" not in reasons:
-        reasons.append("standing grants never cover change or critical")
-    if TIER_RANK[grant.tier] > TIER_RANK[sg.tier]:
-        reasons.append("grant tier exceeds the standing grant tier")
-    if not _scope_within(grant.scope, sg.scope):
-        reasons.append("grant scope exceeds the standing grant scope")
-    # What the standing grant did not name does not ride along with an unattended start.
-    extra = sorted(set(grant.credentials) - set(ceilings.credentials))
-    if extra:
-        reasons.append(f"credentials the standing grant does not allow: {', '.join(x[:40] for x in extra[:4])}")
-    limit = ceilings.budgets or Budgets()
-    over = [f for f in ("wall_s", "tool_calls", "output_bytes", "retries") if getattr(grant.budgets, f) > getattr(limit, f)]
-    if over:
-        reasons.append(f"budgets above the standing grant's ceiling: {', '.join(over)}")
-    return reasons
-
-
 def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
     """The single execution predicate, evaluated inside the caller's transaction."""
     m = conn.execute("SELECT * FROM missions WHERE id=?", (mission_id,)).fetchone()
@@ -249,13 +172,11 @@ def evaluate(conn: sqlite3.Connection, mission_id: str, now: int) -> Verdict:
         return Verdict(False, ("grant tier does not match mission tier",))
 
     reasons: list[str] = list(verification_plan_problems(m))
-    if m["standing_grant_id"]:
-        reasons += _standing_reasons(conn, m, grant, now)
-    else:
-        # (a) the current-grant approval
-        if not _approved(conn, mission_id, "grant", grant_hash, grant.tier == "critical"):
-            reasons.append("no approval for the current grant hash" if grant.tier != "critical"
-                           else "a critical grant needs an elevated grant approval")
+    # (a) the current-grant approval. Always an operator's: standing grants were removed in 4.2, and a `standing_grant_id` left on a
+    # mission from an earlier version authorises nothing (an old approval never runs).
+    if not _approved(conn, mission_id, "grant", grant_hash, grant.tier == "critical"):
+        reasons.append("no approval for the current grant hash" if grant.tier != "critical"
+                       else "a critical grant needs an elevated grant approval")
 
     if TIER_RANK[grant.tier] >= TIER_RANK["change"]:
         reasons += _plan_reasons(conn, m)

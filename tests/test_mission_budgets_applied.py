@@ -18,7 +18,7 @@ def service(tmp_path, budgets=None):
         conn.execute("INSERT INTO incidents VALUES (?, 'fp', 1, 'container_health', 'media/plex', 'open', "
                      "'failing', 'HIGH', 's', '{}', 'scan1', 1, 1, NULL, 1)", ("c" * 12,))
     kwargs = {} if budgets is None else {"budgets": budgets}
-    return MissionService(store, enabled=lambda: True, incident_context=lambda i: INCIDENT, **kwargs), MissionStore(store)
+    return MissionService(store, enabled=lambda: True, **kwargs), MissionStore(store)
 
 
 def grant_of(svc_store, mission):
@@ -35,7 +35,7 @@ def test_configured_budgets_are_applied_to_an_operator_mission(tmp_path):
 def test_configured_budgets_are_applied_to_an_incident_mission(tmp_path):
     cfg = MissionBudgetsConfig(wall_seconds=300, tool_calls=11, output_bytes=1000, retries=1)
     svc, ms = service(tmp_path, lambda: cfg)
-    made = svc.investigate_incident("c" * 12, operator="telegram:1")["mission"]
+    made = svc.create_mission(operator="telegram:1", title="t", goal="g", incident_id="c" * 12)
     assert grant_of(ms, made).budgets == Budgets(wall_s=300, tool_calls=11, output_bytes=1000, retries=1)
 
 

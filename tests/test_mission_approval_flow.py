@@ -220,7 +220,8 @@ def test_the_flow_itself_refuses_a_non_operator_actor(stack):
     with pytest.raises(FlowError):
         st.flow.deny("core", mid, h)
     with pytest.raises(FlowError):
-        st.flow.standing_revoke("system", "SG-1-v1")
+        st.flow.propose_repair("core", title="t", goal="g", scope={"stacks": ["media"]},
+                               checks=[{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}])
     assert not approvals_rows(st, mid)
 
 
@@ -248,31 +249,10 @@ def test_every_new_rpc_answers_disabled_before_it_looks_at_params_and_unavailabl
     st = stack()
     off = MissionService(st.store, enabled=lambda: False)
     handlers = off.handlers()
-    for method in ("mission.approval_card", "mission.propose_repair", "mission.approve", "mission.deny",
-                   "mission.rollback", "standing.create", "standing.supersede", "standing.revoke",
-                   "standing.list"):
+    for method in ("mission.approval_card", "mission.approve", "mission.deny", "mission.rollback"):
         assert call(handlers, method, junk=1)["error"] == "disabled", method
     on = MissionService(st.store, enabled=lambda: True)               # no flow attached
-    assert call(on.handlers(), "standing.list")["error"] == "unavailable"
     assert call(on.handlers(), "mission.approval_card", mission_id="M-1")["error"] == "unavailable"
-
-
-def test_propose_repair_over_rpc_validates_before_anyone_is_asked(stack):
-    st = stack()
-    _, handlers = service(st)
-    base = {"operator": "alice", "title": "t", "goal": "g", "scope": {"stacks": ["media"]},
-            "checks": [{"id": "default", "check": "http", "params": {"url": "http://localhost/"}}]}
-    made = call(handlers, "mission.propose_repair", **base)
-    assert made["status"] == "awaiting_decision" and made["grant_hash"]
-    for gone in ({"docker": "lifecycle"}, {"sudo": {"mode": "broad"}}, {"acknowledged_no_backup": True}, {"exclusions": ["x"]}):
-        assert call(handlers, "mission.propose_repair", **{**base, **gone})["error"] == "bad_request", gone   # trust mode removed them
-    assert call(handlers, "mission.propose_repair", **{**base, "checks": []})["error"] == "bad_request"
-    assert call(handlers, "mission.propose_repair", **{**base, "checks": [{"id": "x", "check": "shell", "params": {}}]})["error"] == "bad_request"
-    st.flow.validator = lambda grant, plan: ["scope stack 'secrets' is not in the discovered inventory"]
-    refused = call(handlers, "mission.propose_repair", **base)
-    assert refused["error"] == "invalid_grant" and "inventory" in refused["message"]
-    st.flow.validator = None
-    assert call(handlers, "mission.propose_repair", **base)["error"] == "unavailable"
 
 
 def test_a_worker_raised_card_cannot_approve_anything(stack):

@@ -71,7 +71,7 @@ def test_an_operator_handler_table_cannot_be_loaded_onto_the_worker_server(env):
         build_worker_server,
     )
     operator = MissionService(None, enabled=False).handlers()
-    for name in ("mission.approve", "standing.create", "mission.rollback", "mission.cancel"):
+    for name in ("mission.approve", "mission.deny", "mission.rollback", "mission.cancel"):
         with pytest.raises(ValueError):
             build_worker_server("/tmp/never.sock", Backend(), WorkerAuthenticator(None, resolve=Sessions().resolve),
                                 group=None, handlers={name: operator[name]})

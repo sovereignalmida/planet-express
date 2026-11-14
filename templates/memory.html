@@ -12,12 +12,13 @@
   {% if c.steps %}<ol class="mc-steps">{% for s in c.steps %}<li>{{ s.text }} <span class="cell-dim">check: {{ s.check }}</span></li>{% endfor %}</ol>{% endif %}
   {% if c.scope %}<p class="mc-card-meta">{{ c.scope | join(', ') }}</p>{% endif %}
   {% if c.conflicts_with %}<p class="mc-card-meta">conflicts with {{ c.conflicts_with | join(', ') }}</p>{% endif %}
+  {% if c.offered_in %}<p class="mc-card-meta">offered in <a href="/console/{{ c.offered_in.conversation_id }}">{{ c.offered_in.title }}</a></p>{% endif %}
   {% if actions %}
   <div class="mc-actions">
     {% if 'confirm' in actions %}
     <form method="post" action="{{ url_for('memory_confirm', card_id=c.id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-      <button class="pe-btn accent" type="submit">CONFIRM</button>
+      <button class="pe-btn accent" type="submit">{{ 'KEEP' if c.status == 'candidate' else 'CONFIRM' }}</button>
     </form>{% endif %}
     {% if 'reverify' in actions %}
     <form method="post" action="{{ url_for('memory_reverify', card_id=c.id) }}">
@@ -28,7 +29,7 @@
     <form method="post" action="{{ url_for('memory_deprecate', card_id=c.id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <input class="mc-reason" type="text" name="reason" maxlength="500" placeholder="reason (optional)" aria-label="Reason">
-      <button class="pe-btn warn" type="submit">DEPRECATE</button>
+      <button class="pe-btn warn" type="submit">{{ 'DISCARD' if c.status == 'candidate' else 'DEPRECATE' }}</button>
     </form>{% endif %}
   </div>
   {% endif %}

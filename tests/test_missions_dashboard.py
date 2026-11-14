@@ -67,7 +67,11 @@ class Core:
             "canary.candidates": [], "proposal.list_pending": [],
             "mission.provider_usage": {"source": "none", "available": False, "state": "off"},
             "record.list": self.record_page,
+            "needs.list": self.needs_page,
         }
+        self.waiting = []                       # what Core's NEEDS YOU rule answers for missions (tested in test_mission_service)
+        self.waiting_readable = True
+        self.waiting_truncated = False
         self.record = [rec("conversation", "c1", "Why is <script>x</script> slow", outcome="open", nature="question",
                            runs=[]),
                        rec("execution", "a1", "Canary update media/plex", outcome="completed", origin="automatic",
@@ -82,6 +86,17 @@ class Core:
         rows = [m for m in self.pool if (m["status"] in closed) == (params.get("scope") == "closed")]
         return {"missions": rows[:params["limit"]], "total": len(rows), "limit": params["limit"], "offset": 0,
                 "truncated": False}
+
+    def needs_page(self, params):
+        """needs.list as Core answers it: the plans and held windows this fake holds, plus `waiting`."""
+        plans = self.results["proposal.list_pending"]
+        windows = self.results["canary.candidates"]
+        plans = len(plans) if isinstance(plans, list) else None
+        held = sum(1 for w in windows if isinstance(w, dict) and w.get("held")) if isinstance(windows, list) else None
+        missions = list(self.waiting) if self.waiting_readable else []
+        count = None if None in (plans, held) else plans + held + len(missions)
+        return {"plans": plans, "held_windows": held, "missions": missions, "missions_readable": self.waiting_readable,
+                "truncated": self.waiting_truncated, "count": count}
 
     def record_page(self, params):
         """record.list as core answers it: the real filter and paging over `self.record`."""
@@ -168,7 +183,7 @@ def test_the_record_has_sub_tabs_and_counts_what_needs_a_decision(web):
 
 def test_the_count_goes_quiet_when_core_cannot_answer(web):
     client, core, _ = web
-    core.errors["proposal.list_pending"] = "unavailable"
+    core.errors["needs.list"] = "unavailable"
     r = client.get("/missions")
     assert r.status_code == 200 and "mc-subtab-count" not in r.get_data(as_text=True)
 
@@ -184,8 +199,8 @@ def test_needs_you_holds_the_old_actions_panels(web):
     assert 'class="mc-subtab is-active" href="/missions/needs-you" aria-current="page">NEEDS YOU' in page
     assert "panels.js" in page and "approvals.js" in page and "incidents.js" in page and "elevate.js" in page
     assert 'class="tab active" href="/missions"' in page                 # the top bar still says Missions
-    # Only the list of missions waiting on you (rc14.7.4); the panels themselves need no mission.
-    assert [m for m in core.methods() if m.startswith("mission.")] == ["mission.list"]
+    # NEEDS YOU is Core's one rule (4.2): the dashboard asks for it once, and reads no mission list of its own.
+    assert core.methods().count("needs.list") == 1 and not [m for m in core.methods() if m.startswith("mission.")]
 
 
 def test_the_record_needs_you_and_updates_work_with_missions_off(web, monkeypatch, tmp_path):
@@ -228,53 +243,52 @@ def test_needs_you_reads_the_windows_once_and_every_missions_page_shows_the_coun
     assert core.methods().count("canary.candidates") == 1
     assert '<span class="mc-subtab-count">1</span>' in page
     assert 'id="mc-subtabs"' in page                                    # panels.js swaps it, so the count follows
-    for path in ("/missions/M-2", "/missions/standing"):
-        core.results.setdefault("standing.list", {"standing_grants": []})
+    for path in ("/missions/M-2", "/missions/updates"):
         assert '<span class="mc-subtab-count">1</span>' in client.get(path).get_data(as_text=True), path
+
+
+def waiting(mid, title, status="awaiting_decision", tier="repair"):
+    """One item of Core's needs.list, as `MissionService.needs_missions` makes it."""
+    return {**mission(mid, title, status=status, tier=tier), "href": f"/missions/{mid}",
+            "meta": f"{status.replace('_', ' ')} · {tier}"}
 
 
 def test_needs_you_lists_and_counts_the_missions_waiting_on_you(web):
     client, core, _ = web
-    core.pool = [mission("M-5", "Approve <b>this</b>", status="awaiting_decision", tier="repair"),
-                 mission("M-6", "Held run", status="needs_operator", tier="repair"),
-                 mission("M-7", "Busy", status="executing", tier="repair"),
-                 mission("M-1", "Old one", status="completed")]
+    core.waiting = [waiting("M-5", "Approve <b>this</b>"), waiting("M-6", "Held run", status="needs_operator"),
+                    {"id": "Console", "title": "Update immich", "href": "/console/c-plan", "meta": "Needs your call",
+                     "status": "console", "tier": "console"}]
     page = client.get("/missions/needs-you").get_data(as_text=True)
     panel = page[page.index('id="waiting-missions-panel"'):page.index('id="approval-panel"')]
-    assert 'href="/missions/M-5"' in panel and 'href="/missions/M-6"' in panel
-    assert "M-7" not in panel and "M-1" not in panel
-    assert "Approve &lt;b&gt;this&lt;/b&gt;" in panel and "needs operator" in panel
-    assert '<span class="mc-subtab-count">2</span>' in page
-    board = client.get("/missions").get_data(as_text=True)
-    assert '<span class="mc-subtab-count">2</span>' in board                # the board counts from its own list
+    assert 'href="/missions/M-5"' in panel and 'href="/missions/M-6"' in panel and 'href="/console/c-plan"' in panel
+    assert "Approve &lt;b&gt;this&lt;/b&gt;" in panel and "needs operator" in panel and "Needs your call" in panel
+    assert '<span class="mc-subtab-count">3</span>' in page
+    record = client.get("/missions").get_data(as_text=True)
+    assert '<span class="mc-subtab-count">3</span>' in record                 # every page reads the same count
 
 
 def test_needs_you_says_so_when_it_cannot_read_the_missions(web):
     """The missions it cannot read leave out only themselves: the plans and held windows are still counted."""
     client, core, _ = web
-    core.errors["mission.list"] = "unavailable"
+    core.waiting_readable = False
     core.results["proposal.list_pending"] = [{"id": "p1"}]
     core.calls.clear()
     page = client.get("/missions/needs-you").get_data(as_text=True)
     assert "Could not read the missions waiting for you" in page
     assert '<span class="mc-subtab-count">1</span>' in page
-    assert core.methods().count("mission.list") == 1                  # a failed read is not asked again for the badge
+    assert core.methods().count("needs.list") == 1                    # one read serves the list and the badge
 
 
 def test_more_open_missions_than_one_page_is_said_too(web):
     client, core, _ = web
-    core.pool = [mission("M-5", "Approve", status="awaiting_decision", tier="repair")]
-    listing = core.list_pool
-    core.results["mission.list"] = lambda params: listing(params) | {"total": 900}
+    core.waiting, core.waiting_truncated = [waiting("M-5", "Approve")], True
     assert "Core's list was cut short" in client.get("/missions/needs-you").get_data(as_text=True)
 
 
 def test_needs_you_says_when_cores_list_was_cut_short(web):
     client, core, _ = web
-    core.pool = [mission("M-5", "Approve", status="awaiting_decision", tier="repair"),
-                 mission("M-9", "Legacy pause", status="paused_tripwire", tier="repair")]
-    listing = core.list_pool
-    core.results["mission.list"] = lambda params: listing(params) | {"truncated": True}
+    core.waiting = [waiting("M-5", "Approve"), waiting("M-9", "Legacy pause", status="paused_tripwire")]
+    core.waiting_truncated = True
     page = client.get("/missions/needs-you").get_data(as_text=True)
     assert "2+ ·" in page and "Core's list was cut short" in page
     assert 'href="/missions/M-9"' in page                       # a legacy paused mission waits on you too
@@ -348,8 +362,7 @@ def test_the_record_renders_rows_and_escapes(web):
     core.record[0].update(calls=3, cost_usd=0.4182, unpriced=1)
     r = client.get("/missions")
     page = r.get_data(as_text=True)
-    assert r.status_code == 200 and core.methods() == ["record.list", "mission.provider_usage", "proposal.list_pending",
-                                                       "canary.candidates", "mission.list"]
+    assert r.status_code == 200 and core.methods() == ["record.list", "mission.provider_usage", "needs.list"]
     assert [p for m, p in core.calls if m == "record.list"] == [{"limit": 50, "offset": 0}]
     assert "Why is &lt;script&gt;x&lt;/script&gt; slow" in page and "<script>x</script>" not in page
     assert "Restart &lt;b&gt;plex&lt;/b&gt;" in page and 'href="/missions/M-9"' in page and "rolled back" in page
@@ -412,8 +425,7 @@ def test_the_record_filters_and_pages(web):
 def test_detail_shows_events_artifacts_result_and_cancel(web):
     client, core, _ = web
     page = client.get("/missions/M-2").get_data(as_text=True)
-    assert [m for m in core.methods()] == ["mission.get", "mission.events", "proposal.list_pending", "canary.candidates",
-                                          "mission.list"]
+    assert [m for m in core.methods()] == ["mission.get", "mission.events", "needs.list"]
     assert "Find &lt;b&gt;why&lt;/b&gt;" in page and "<b>why</b>" not in page
     assert "report.md" in page and "operator:alice" in page and "done" in page
     assert 'action="/missions/M-2/cancel"' in page and 'name="csrf_token"' in page
@@ -568,29 +580,6 @@ def test_memory_unavailable_state(web):
 
 
 # ── incident -> mission ───────────────────────────────────────────────────────
-def test_investigate_creates_a_mission_as_the_session_operator(web):
-    client, core, _ = web
-    r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": token(client), "operator": "bob"})
-    assert r.status_code == 200 and r.get_json()["mission"]["id"] == "M-7"
-    assert ("mission.from_incident", {"incident_id": INC, "operator": "alice"}) in core.calls
-
-
-def test_investigate_validates_the_id_and_maps_errors(web):
-    client, core, _ = web
-    t = token(client)
-    assert client.post("/api/incidents/short/investigate", data={"csrf_token": t}).status_code == 400
-    assert "mission.from_incident" not in core.methods()
-    for code, status in (("disabled", 404), ("not_found", 404), ("bad_request", 400), ("timeout", 503)):
-        core.errors["mission.from_incident"] = code
-        r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": t})
-        assert r.status_code == status and set(r.get_json()) == {"error"}
-
-
-def test_incidents_js_offers_investigate():
-    js = (Path(__file__).resolve().parent.parent / "static" / "incidents.js").read_text()
-    assert "/investigate" in js and "INVESTIGATE" in js
-
-
 # ── round 2 ───────────────────────────────────────────────────────────────────
 def test_board_columns_follow_the_model_statuses():
     from typing import get_args
@@ -633,62 +622,7 @@ def test_reverify_post_uses_session_operator_and_csrf(web):
     assert client.post("/memory/Bad Id/reverify", data={"csrf_token": token(client)}).status_code in (400, 404)
 
 
-def test_investigate_internal_failure_is_not_a_retry_prompt(web):
-    client, core, _ = web
-    core.errors["mission.from_incident"] = "internal"
-    r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": token(client)})
-    assert r.status_code == 500 and "retry" not in r.get_json()["error"].lower()
-    core.errors["mission.from_incident"] = "timeout"
-    r = client.post(f"/api/incidents/{INC}/investigate", data={"csrf_token": token(client)})
-    assert r.status_code == 503
-
-
 # ── 4.0.1 (operator, live): NEEDS YOU is real -- an answered Console conversation is not a decision ─────────────────────────
-def test_a_console_conversation_or_its_run_is_judged_by_the_console_not_its_mission_status(web, monkeypatch):
-    client, core, _ = web
-    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
-    core.pool = [mission("M-37", "Are the 4k apps running?", status="awaiting_decision", tier="observe", runtime="console",
-                         conversation_id="c-answered"),
-                 mission("M-41", "Run waiting to be authorised", status="awaiting_decision", tier="repair", conversation_id="c-plan"),
-                 mission("M-5", "A Work-log mission to decide", status="awaiting_decision", tier="repair")]
-    core.results["console.list"] = {"conversations": [
-        {"id": "c-answered", "title": "Are the 4k apps running?", "status": {"group": "Recent", "text": "Answered", "level": "ok"}},
-        {"id": "c-plan", "title": "Update immich", "status": {"group": "Needs you", "text": "Needs your call", "level": "warn"}},
-        {"id": "c-busy", "title": "Busy one", "status": {"group": "Working", "text": "Looking into it", "level": "ok"}}],
-        "status": {}}
-    page = client.get("/missions/needs-you").get_data(as_text=True)
-    assert "Are the 4k apps running?" not in page                                   # answered: your turn to reply, not a decision
-    assert 'href="/console/c-plan"' in page and "Needs your call" in page           # the Console says it needs you: listed once
-    assert "Run waiting to be authorised" not in page                               # its run counts through the conversation
-    assert 'href="/missions/M-5"' in page                                           # a mission outside the Console, as before
-    assert '<span class="mc-subtab-count">2</span>' in page                         # the Console item and M-5, nothing else
-
-
-def test_with_the_console_off_or_unreadable_needs_you_still_lists_the_other_missions(web, monkeypatch):
-    client, core, _ = web
-    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
-    core.pool = [mission("M-5", "A Work-log mission to decide", status="awaiting_decision", tier="repair")]
-    core.errors["console.list"] = "unavailable"
-    page = client.get("/missions/needs-you").get_data(as_text=True)
-    assert 'href="/missions/M-5"' in page and '<span class="mc-subtab-count">1</span>' in page
-
-
-def test_a_held_run_the_console_cannot_show_stays_in_needs_you(web, monkeypatch):
-    """Codex, 4.0.1: Console off, unreadable, or the conversation archived: a held run must not drop out of sight."""
-    client, core, _ = web
-    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
-    core.pool = [mission("M-39", "Held run", status="needs_operator", tier="repair", conversation_id="c-archived"),
-                 mission("M-38", "Answered conversation", status="awaiting_decision", tier="observe", runtime="console",
-                         conversation_id="c-gone")]
-    core.results["console.list"] = {"conversations": [], "status": {}}            # neither conversation is listed any more
-    page = client.get("/missions/needs-you").get_data(as_text=True)
-    assert 'href="/missions/M-39"' in page and "Answered conversation" not in page
-    assert '<span class="mc-subtab-count">1</span>' in page
-    core.errors["console.list"] = "unavailable"
-    page = client.get("/missions/needs-you").get_data(as_text=True)
-    assert 'href="/missions/M-39"' in page and '<span class="mc-subtab-count">1</span>' in page
-
-
 # ── 4.0.1 (operator): a conversation is marked done, not cancelled ────────────────────────────────────────────────────────────
 def test_a_conversations_mission_page_offers_done_not_cancel_and_done_closes_it_through_the_console(web, monkeypatch):
     client, core, _ = web
@@ -711,19 +645,6 @@ def test_a_mission_without_a_conversation_keeps_cancel(web):
     assert "CANCEL MISSION" in page and "/done" not in page
 
 
-def test_a_held_run_stays_in_needs_you_while_its_conversation_is_working(web, monkeypatch):
-    """Codex, 4.0.1: a follow-up running in the conversation shows "Working", not the hold; the run is listed as itself."""
-    client, core, _ = web
-    monkeypatch.setattr(config.MISSIONS.console, "enabled", True, raising=False)
-    core.pool = [mission("M-39", "Held run", status="needs_operator", tier="repair", conversation_id="c-busy"),
-                 mission("M-38", "The conversation", status="investigating", tier="observe", runtime="console",
-                         conversation_id="c-busy")]
-    core.results["console.list"] = {"conversations": [
-        {"id": "c-busy", "title": "Update immich", "status": {"group": "Working", "text": "Looking into it"}}], "status": {}}
-    page = client.get("/missions/needs-you").get_data(as_text=True)
-    assert 'href="/missions/M-39"' in page and '<span class="mc-subtab-count">1</span>' in page
-
-
 def test_with_the_console_off_a_conversations_mission_keeps_cancel(web, monkeypatch):
     client, core, _ = web
     monkeypatch.setattr(config.MISSIONS.console, "enabled", False, raising=False)
@@ -731,3 +652,20 @@ def test_with_the_console_off_a_conversations_mission_keeps_cancel(web, monkeypa
                                                  runtime="console"), conversation_id="c-old")
     page = client.get("/missions/M-37").get_data(as_text=True)
     assert "CANCEL MISSION" in page and "/done" not in page
+
+
+def test_a_run_the_console_decides_shows_no_controls_here_and_links_there(web):
+    """4.2: Core says which runs the Console decides (the latest run of an open conversation); their page only links there."""
+    client, core, _ = web
+    core.results["mission.get"] = detail(mission("M-41", "Run", status="awaiting_decision", tier="repair"),
+                                         conversation_id="c-plan", decided_in_console="c-plan")
+    core.results["mission.approval_card"] = {"grant_hash": "a" * 64, "warnings": [], "scope": {}, "credentials": [],
+                                             "budgets": {"wall_s": 1, "tool_calls": 1, "output_bytes": 1, "retries": 0},
+                                             "verification": {"checks": [], "on_verify_fail": "needs_operator"},
+                                             "required": [{"phase": "grant", "state": "pending", "elevated": False, "bound": "a" * 64}]}
+    page = client.get("/missions/M-41").get_data(as_text=True)
+    assert "Decided in the Console" in page and 'href="/console/c-plan"' in page
+    assert "APPROVE GRANT" not in page and "DENY AND CLOSE" not in page and "CANCEL MISSION" in page
+    core.results["mission.get"] = detail(mission("M-40", "Earlier run", status="completed", tier="repair"),
+                                         conversation_id="c-plan", decided_in_console=None)
+    assert "Decided in the Console" not in client.get("/missions/M-40").get_data(as_text=True)

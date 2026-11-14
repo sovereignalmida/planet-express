@@ -49,8 +49,8 @@ What a second reviewer should attend to, v3 and v4 together:
   guards instead: the hash-bound approval and `Grant.load` / `is_legacy_grant` (an old approval never runs); the
   checkpoint/restore service and `Supervisor.roll_back`; PE-run verification and the close-as-failed path when nothing
   changed (`Supervisor._nothing_changed`); the hook's hard-block list and its per-launch copy; the root launcher
-  (`pe_launch.py` identity and group checks) and setup's `session-access` step; standing grants (scope, expiry, never
-  Change/Critical); the per-principal RPC method allowlist (the worker must never reach approval/decision methods);
+  (`pe_launch.py` identity and group checks) and setup's `session-access` step; that a `standing_grant_id` left on a mission
+  from before 4.2 authorises nothing (`approvals.evaluate`; standing grants were removed); the per-principal RPC method allowlist (the worker must never reach approval/decision methods);
   leases and fencing (`leases.conflict_words`); the supervisor's crash classification; redaction before persistence;
   memory quarantine (candidates are never injected into a session until operator-confirmed).
 - **Still as built:** `missions/grants.py` (validation, grant-to-env builder: secrets out of the session env) and

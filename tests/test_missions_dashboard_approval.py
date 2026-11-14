@@ -144,66 +144,6 @@ GRANT = {"id": "SG-1-v1", "version": 1, "tier": "repair", "state": "active", "sc
          "expires_at": 9999, "revoked_at": None}
 
 
-def test_the_standing_page_lists_and_offers_revoke_and_create(web):
-    client, core, _ = web
-    core.results["standing.list"] = {"standing_grants": [GRANT]}
-    page = client.get("/missions/standing").get_data(as_text=True)
-    assert ("standing.list", {"include_inactive": False}) in core.calls       # then the NEEDS YOU count's reads
-    assert "SG-1-v1" in page and 'action="/missions/standing/SG-1-v1/revoke"' in page and 'action="/missions/standing"' in page
-    assert "never change or critical" in page
-    client.get("/missions/standing?all=1")
-    assert ("standing.list", {"include_inactive": True}) in core.calls
-
-
-def test_the_standing_page_says_a_pre_upgrade_standing_grant_no_longer_applies(web):
-    client, core, _ = web
-    text = "This standing grant was approved before PE's trust-mode update changed what an approval covers, so it no longer applies."
-    core.results["standing.list"] = {"standing_grants": [{**GRANT, "legacy": True, "legacy_text": text}]}
-    page = client.get("/missions/standing").get_data(as_text=True)
-    assert "MADE BEFORE AN UPDATE" in page and "no longer applies" in page
-    assert 'action="/missions/standing/SG-1-v1/revoke"' in page                 # and it can still be revoked
-    core.results["standing.list"] = {"standing_grants": [GRANT]}
-    assert "MADE BEFORE AN UPDATE" not in client.get("/missions/standing").get_data(as_text=True)
-
-
-def test_the_standing_page_says_so_when_it_is_unavailable(web):
-    client, core, _ = web
-    core.errors["standing.list"] = "unavailable"
-    assert client.get("/missions/standing").status_code == 200
-
-
-def test_creating_a_standing_grant_sends_the_session_operator_and_elevated_only_when_elevated(web):
-    client, core, _ = web
-    core.results["standing.create"] = GRANT
-    form = {"csrf_token": token(client), "stacks": "media, photos", "services": "", "hours": "6", "deny": "02:00-03:30",
-            "operator": "bob", "elevated": "true", "tier": "change"}
-    client.post("/missions/standing", data=form)
-    method, params = core.calls[-1]
-    assert method == "standing.create" and params == {
-        "operator": "alice", "scope": {"stacks": ["media", "photos"], "services": []}, "ttl_s": 6 * 3600,
-        "elevated": False, "window": {"deny": ["02:00-03:30"]}}
-    elevate(client)
-    form["csrf_token"] = token(client)
-    client.post("/missions/standing", data=form)
-    assert core.calls[-1][1]["elevated"] is True
-    assert client.post("/missions/standing", data={**form, "hours": "x"}).status_code == 400
-
-
-def test_revoke_and_a_bad_id(web):
-    client, core, _ = web
-    core.results["standing.revoke"] = {**GRANT, "state": "revoked"}
-    r = client.post("/missions/standing/SG-1-v1/revoke", data={"csrf_token": token(client), "operator": "bob"})
-    assert r.status_code == 302 and r.headers["Location"].endswith("notice=standing_revoked")
-    assert core.calls[-1] == ("standing.revoke", {"operator": "alice", "standing_id": "SG-1-v1"})
-    assert client.post("/missions/standing/nope/revoke", data={"csrf_token": token(client)}).status_code == 404
-
-
-def test_the_missions_board_links_to_the_standing_grants_page():
-    import pathlib
-    html = pathlib.Path("templates/missions.html").read_text()
-    assert "url_for('standing_page')" in html
-
-
 def test_a_completed_repair_with_a_checkpoint_offers_undo_and_one_without_does_not(web):
     client, core, _ = web
     core.results["mission.get"] = detail({**mission("M-2", "restart media", status="completed", tier="repair"), "has_checkpoint": True})
@@ -213,3 +153,10 @@ def test_a_completed_repair_with_a_checkpoint_offers_undo_and_one_without_does_n
     core.results["mission.get"] = detail({**mission("M-2", "restart media", status="completed", tier="repair"), "has_checkpoint": False})
     page = client.get("/missions/M-2").get_data(as_text=True)
     assert 'action="/missions/M-2/rollback"' not in page
+
+
+def test_the_standing_grants_page_is_gone(web):  # noqa: F811
+    """4.2 removed standing grants (they never had an effect: nothing attached one to a mission)."""
+    client, core, _ = web
+    assert client.get("/missions/standing").status_code == 404
+    assert "STANDING GRANTS" not in client.get("/missions").get_data(as_text=True)

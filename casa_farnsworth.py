@@ -3223,8 +3223,6 @@ def run_bot() -> None:
 
     missions = MissionService(
         store, enabled=lambda: config.MISSIONS_ENABLED, budgets=lambda: config.MISSIONS.budgets,
-        incident_context=lambda incident_id: commands.get_incident_context(
-            incident_id, timeout=actions.RPC_DOCKER_TIMEOUT_SECONDS),
     )
     # Actions and Missions see each other: while a mission holds a lease, no v3 change starts (the busy message names the
     # mission); the mission's own writes take the same lock (the Docker proxy, typed steps). Registered BEFORE anything can

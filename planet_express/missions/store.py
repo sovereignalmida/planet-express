@@ -19,13 +19,8 @@ from .models import Grant, Mission, MissionEvent, Origin, SessionKind
 from .state import MissionNotFound, transition_in_txn
 
 
-
 class GrantLocked(RuntimeError):
     """An approving row already exists for this grant hash, so the grant is immutable."""
-
-
-class StandingGrantInactive(RuntimeError):
-    """The standing grant a change was meant to replace is already revoked (or gone): nothing was written."""
 
 
 class SessionConflict(RuntimeError):
@@ -465,52 +460,5 @@ class MissionStore:
     def hash_token(token: str) -> str:
         return hashlib.sha256(token.encode()).hexdigest()
 
-    # ── standing grants ─────────────────────────────────────────────────────
-    @staticmethod
-    def _standing_scope_json(scope: Mapping[str, Any], ceilings: Mapping[str, Any] | None) -> str:
-        """The scope (a `GrantScope`) and, when given, its ceilings, under the one `ceilings` key in the same document."""
-        from .models import GrantScope, StandingCeilings
-        body = GrantScope.model_validate(scope).model_dump(mode="json")
-        if ceilings is not None:
-            body["ceilings"] = StandingCeilings.model_validate(ceilings).model_dump(mode="json")
-        return canonical_json(body)
 
-    def create_standing_grant(self, *, grant_id: str, scope: Mapping[str, Any], tier: str, created_by: str,
-                              expires_at: int, window: Mapping[str, Any] | None = None, version: int = 1,
-                              ceilings: Mapping[str, Any] | None = None) -> None:
-        from .models import Window
-        scope_json = self._standing_scope_json(scope, ceilings)
-        window_json = canonical_json(Window.model_validate(window).model_dump(mode="json")) if window else None
-        with self.store._write() as conn:
-            conn.execute(
-                "INSERT INTO standing_grants (id, scope_json, tier, window_json, created_by, created_at, "
-                "expires_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (grant_id, scope_json, tier, window_json, created_by, self._now(), expires_at, version),
-            )
-
-    def supersede_standing_grant(self, *, old_id: str, grant_id: str, scope: Mapping[str, Any], tier: str, created_by: str,
-                                 expires_at: int, window: Mapping[str, Any] | None, version: int,
-                                 ceilings: Mapping[str, Any] | None = None) -> None:
-        """A new version and the revocation of the one it replaces, in ONE transaction: a crash can never leave both active."""
-        from .models import Window
-        scope_json = self._standing_scope_json(scope, ceilings)
-        window_json = canonical_json(Window.model_validate(window).model_dump(mode="json")) if window else None
-        now = self._now()
-        with self.store._write() as conn:
-            # Conditional on the old row still being active, checked FIRST: a revoke that landed after the caller read it
-            # must not be undone by a new active version, so zero rows updated aborts the whole transaction.
-            cur = conn.execute("UPDATE standing_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL", (now, old_id))
-            if cur.rowcount != 1:
-                raise StandingGrantInactive(f"{old_id} is not an active standing grant")
-            conn.execute(
-                "INSERT INTO standing_grants (id, scope_json, tier, window_json, created_by, created_at, "
-                "expires_at, version) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (grant_id, scope_json, tier, window_json, created_by, now, expires_at, version))
-
-    def revoke_standing_grant(self, grant_id: str) -> None:
-        with self.store._write() as conn:
-            conn.execute("UPDATE standing_grants SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
-                         (self._now(), grant_id))
-
-
-__all__ = ["GrantLocked", "MissionStore", "NoFreeUid", "SessionConflict", "StandingGrantInactive", "grant_resources"]
+__all__ = ["GrantLocked", "MissionStore", "NoFreeUid", "SessionConflict", "grant_resources"]

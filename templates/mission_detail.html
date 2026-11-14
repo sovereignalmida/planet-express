@@ -25,6 +25,7 @@
     <a class="pe-link-out" href="/console/{{ m.conversation_id }}">open the conversation ›</a>
   </form>
   {% elif not closed %}
+  {% if in_conversation %}<p class="muted-body">A run of a Console conversation: approve, check again, keep and roll back it there. <a class="pe-link-out" href="/console/{{ m.decided_in_console }}">open the conversation ›</a></p>{% endif %}
   <form method="post" action="{{ url_for('mission_cancel', mission_id=m.id) }}" class="mc-form">
     <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button class="pe-btn warn" type="submit"{{ ' disabled' if m.cancel_requested }}>{{ 'CANCEL REQUESTED' if m.cancel_requested else 'CANCEL MISSION' }}</button>
@@ -35,7 +36,7 @@
 {% if card %}
 <section class="panel" aria-label="Approval card">
   <div class="panel-head-row"><h3>APPROVAL CARD</h3>
-    <span class="panel-head-note">grant {{ card.grant_hash[:8] }}{% if card.standing_grant_id %} · standing {{ card.standing_grant_id }}{% endif %}</span></div>
+    <span class="panel-head-note">grant {{ card.grant_hash[:8] }}</span></div>
   {% for w in card.warnings %}<div class="mc-notice" role="alert"><strong>{{ w.kind | upper }}</strong> {{ w.text }}</div>{% endfor %}
   <dl class="mc-facts">
     <dt>SCOPE</dt><dd class="mc-pre">{{ card.scope | tojson(indent=1) }}</dd>
@@ -44,6 +45,10 @@
 {% endfor %}on failure: {{ card.verification.on_verify_fail }}</dd>
     {% if card.credentials %}<dt>TOOLS</dt><dd>{{ card.credentials | join(', ') }}</dd>{% endif %}
   </dl>
+  {% if in_conversation %}
+  {# 4.2: one place to act. A run a conversation started is decided in that conversation; this page shows it. #}
+  <p class="muted-body">Decided in the Console: <a class="pe-link-out" href="/console/{{ m.decided_in_console }}">open the conversation ›</a></p>
+  {% else %}
   {% if m.status == 'awaiting_decision' %}
   <h4>APPROVALS</h4>
   {% for r in card.required %}
@@ -78,6 +83,7 @@
       <label><input type="checkbox" name="ack_drift" value="1"> I accept overwriting what changed since</label>
       <button class="pe-btn warn" type="submit">{{ 'UNDO THIS CHANGE (ROLL BACK)' if undo else 'ROLL BACK' }}</button></form>
   </div>
+  {% endif %}
   {% endif %}
 </section>
 {% endif %}

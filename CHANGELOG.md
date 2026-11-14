@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-11-14
+
+Finishes reconciling Missions and Memory (`docs/designs/missions-memory.md`, releases 3 and 4).
+
+### Changed
+- **NEEDS YOU is one rule, in Core** (`needs.list`): plans waiting for approval, canary rollback windows held for you, and the
+  missions and Console conversations waiting on you. The NEEDS YOU badge, its page and the Overview's HULL tile all read it
+  (the tile's PLANS pill is now NEED YOU and counts the same thing). Missions that cannot be read leave out only themselves;
+  unknown plans or windows make the count unknown, never zero.
+- **One place to act.** The latest run of an open Console conversation is approved, denied, checked again, kept and rolled back
+  in that conversation (Core decides which runs: `console_decides`). An earlier run (its Undo) and a run a closed or archived
+  conversation left behind keep their controls on the mission page, so no run is ever out of reach. Its mission page shows the facts and links there; the dashboard's action routes and Telegram's `/approve`,
+  `/deny` and `/rollback` answer "decide it in the conversation" and name the Console commands. With the Console off, missions
+  are decided on their page as before; CANCEL stays (the Console cannot stop a run).
+- **Memory speaks the Console's words**: a candidate is **Keep** or **Discard** (CONFIRM and DEPRECATE stay for confirmed cards),
+  and a lesson a conversation offered says "offered in <conversation>" and links to it.
+- **An incident is looked into in the Console** (ASK THE CONSOLE). A question about an incident on another host says so, as the
+  old INVESTIGATE goal did.
+
+### Removed
+- **Standing grants**: the page, its link, the `standing.*` RPCs, the attach path in the approval flow and the store methods.
+  They never had an effect (nothing attached one to a mission). A `standing_grant_id` left on a mission from an earlier version
+  now authorises nothing: every run needs an operator's approval. The table stays (no schema change); `missions.windows` is still
+  accepted and does nothing.
+- **The pre-Console mission creation path**: INVESTIGATE on an incident with the Console off, its dashboard route, and the
+  `mission.create`, `mission.from_incident` and `mission.propose_repair` RPCs (no caller: the Console makes conversations and
+  their runs in Core).
+
+### Fixed
+- DONE on a conversation's mission page said "Repair missions are not available" when the Console was down: two notices shared
+  one key (4.0.1).
+
 ## [4.1.0] - 2026-11-13
 
 ### Changed

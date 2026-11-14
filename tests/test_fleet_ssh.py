@@ -546,11 +546,11 @@ def test_the_overview_counts_problems_by_the_alerts_rule(tmp_path):
     assert remote_summary(inv, path, wall=lambda: 1000.0)["problems"] == 2
 
 
-def test_investigating_an_incident_on_another_host_says_so_in_the_goal():
-    import inspect
-    from planet_express.application import mission_service
-    src = inspect.getsource(mission_service.MissionService.investigate_incident)
-    assert '("remote_container", "remote_host")' in src and "ANOTHER host" in src and "Propose nothing for this host" in src
+def test_asking_the_console_about_an_incident_on_another_host_says_so():
+    """4.2: INVESTIGATE (a pre-Console mission) is gone; ASK THE CONSOLE carries its "on ANOTHER host" sentence."""
+    src = (Path(__file__).resolve().parent.parent / "static" / "incidents.js").read_text()
+    assert 'item.kind === "remote_container" || item.kind === "remote_host"' in src and "ANOTHER host" in src
+    assert "propose nothing for this host" in src
 
 
 def test_leftover_beszel_keys_never_make_a_config_invalid():

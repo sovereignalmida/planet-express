@@ -35,14 +35,15 @@ import dashboard_data
 import web_auth
 from config_io import validate_config_text
 from planet_express.application.mission_service import (
-    INCIDENT_ID_RE,
     MISSION_ID_RE,
     TERMINAL_STATUSES,
 )
 from planet_express.application.multi_host import Fleet
-from planet_express.application.record import NATURES as RECORD_NATURES
-from planet_express.application.record import ORIGINS as RECORD_ORIGINS
-from planet_express.application.record import OUTCOMES as RECORD_OUTCOMES
+from planet_express.application.record import (
+    NATURES as RECORD_NATURES,
+    ORIGINS as RECORD_ORIGINS,
+    OUTCOMES as RECORD_OUTCOMES,
+)
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
 from planet_express.memory.models import SLUG_RE
@@ -809,14 +810,6 @@ def create_app(environ=None, *, rpc_call=None, clock=time.time, host_cache=None)
             "incident_id": incident_id, "operator": g.operator,
         }))
 
-    @app.post("/api/incidents/<incident_id>/investigate")
-    def incident_investigate(incident_id):
-        if INCIDENT_ID_RE.fullmatch(incident_id) is None:
-            raise RpcError("Invalid incident ID", "bad_request")
-        return jsonify(core("mission.from_incident", {
-            "incident_id": incident_id, "operator": g.operator,
-        }))
-
     @app.post("/api/incidents/<incident_id>/dismiss")
     def incident_dismiss(incident_id):
         if re.fullmatch(r"[0-9a-f]{12}", incident_id) is None:
@@ -881,7 +874,8 @@ _MISSION_NOTICES = {
     "cancelled": "Mission cancelled.",
     "done": "Marked done. The conversation closes as completed; nothing on the host was changed.",
     "not_conversation": "That mission is not a Console conversation: cancel it, or decide it below.",
-    "unavailable": "The Console is not available right now. Try again in a moment.",
+    "in_conversation": "This run belongs to a Console conversation: decide it there.",
+    "console_unavailable": "The Console is not available right now. Try again in a moment.",
     "conflict": "That mission is already closed.",
     "not_found": "That mission no longer exists.",
     "disabled": "Missions are disabled on this host.",
@@ -895,8 +889,6 @@ _MISSION_NOTICES = {
     "refused": "That could not be done now. The event stream says why.",
     "unavailable": "Repair missions are not available on this host.",
     "invalid_grant": "The grant is not valid; see the event stream.",
-    "standing_created": "Standing grant created.",
-    "standing_revoked": "Standing grant revoked.",
 }
 RECORD_PAGE = 50
 RECORD_MAX_PAGE = 100_000 // RECORD_PAGE          # Core refuses an offset past 100,000
@@ -909,9 +901,9 @@ def _record_when(at) -> str:
     except (TypeError, ValueError, OverflowError, OSError):
         return "—"
 _MEMORY_NOTICES = {
-    "confirmed": "Card confirmed.",
+    "confirmed": "Kept: the card is confirmed and can now be shown to sessions.",
     "reverified": "Card re-verified.",
-    "deprecated": "Card deprecated.",
+    "deprecated": "Set aside: the card is discarded and is never shown to a session.",
     "conflict": "That card is no longer in the state this action needs. Reload and check it.",
     "forbidden": "That card cannot be changed by this action.",
     "not_found": "That card no longer exists.",
@@ -1058,9 +1050,6 @@ class WaitingMissions(list):
 
 # The mission states that wait on the operator, listed and counted under Missions > NEEDS YOU (rc14.7.4). A legacy
 # paused_tripwire mission moves on only by an operator's hand too.
-WAITING_ON_YOU = ("awaiting_decision", "needs_operator", "recovery_required", "paused_tripwire")
-
-
 def register_mission_pages(app, core) -> None:
     """The Missions and Memory pages (v4 S4). Server-rendered; every mutation is a form POST that the
     before-request hook has already CSRF-checked and authenticated, and the acting operator is always the
@@ -1085,82 +1074,32 @@ def register_mission_pages(app, core) -> None:
             abort(404)
         raise error
 
-    def waiting_missions(active=None):
-        """Missions waiting on the operator (NEEDS YOU lists them, rc14.7.4): a grant to decide, a run held for them, a
-        recovery to choose. `active` is a `mission.list` answer the caller already has. Missions off is an empty list;
-        Core unable to answer is None."""
-        if not config.MISSIONS_ENABLED:
-            return []
+    def needs_read():
+        """Core's NEEDS YOU (4.2: one rule, in Core, `needs.list`), or None when Core cannot answer."""
         try:
-            listing = active if active is not None else core("mission.list", {"scope": "active", "limit": 500})
-            rows = listing["missions"]
-        except Exception:  # noqa: BLE001 -- the list is not worth a failed page
+            needs = core("needs.list", {})
+        except Exception:  # noqa: BLE001 -- a badge or a list is not worth a failed page
+            current_app.logger.warning("Could not read NEEDS YOU from core")
             return None
-        # A Console conversation and the runs it started are judged by the Console, not by their mission status: an answered
-        # conversation sits in awaiting_decision, which is "your turn to reply", not a decision (4.0.1, operator: NEEDS YOU
-        # listed things that did not need them).
-        items, listed = console_waiting()
+        return needs if isinstance(needs, dict) and isinstance(needs.get("missions"), list) else None
 
-        def mission_waits(m):
-            if not isinstance(m, dict) or m.get("status") not in WAITING_ON_YOU:
-                return False
-            owner = m.get("conversation_id")
-            own_mission = owner and m.get("runtime") == "console"
-            if own_mission and owner in listed:
-                return False                     # the conversation itself: the Console says whether it needs you
-            if owner and listed.get(owner) == "Needs you":
-                return False                     # a run the Console is showing as needing you: listed once, as the conversation
-            if own_mission and m.get("status") == "awaiting_decision":
-                return False                     # the conversation itself, answered: your turn to reply, never a decision
-            # Otherwise judged as a mission: a held run whose conversation shows "Working" (a follow-up is running, Codex) or is
-            # not listed at all (Console off or unreadable, conversation archived) never drops out of sight.
-            # A run whose conversation the Console cannot show (Console off or unreadable, conversation archived) is judged as
-            # a mission, so a held run never drops out of sight (Codex, 4.0.1).
-            return True
-        waiting = WaitingMissions(
-            {**m, "href": f"/missions/{m['id']}", "meta": f"{str(m.get('status', '')).replace('_', ' ')} · {m.get('tier', '')}"}
-            for m in rows if mission_waits(m))
-        # Core cut the list to fit, or there are more open missions than one page: some may be missing.
-        waiting.truncated = bool(listing.get("truncated")) or (listing.get("total") or 0) > len(rows)
-        waiting.extend(items)
+    def waiting_missions(needs=_UNREAD):
+        """Missions and Console conversations waiting on the operator, as Core judges them; None when they could not be read."""
+        if needs is _UNREAD:
+            needs = needs_read()
+        if needs is None or not needs.get("missions_readable", True):
+            return None
+        waiting = WaitingMissions(m for m in needs["missions"] if isinstance(m, dict))
+        waiting.truncated = bool(needs.get("truncated"))
         return waiting
 
-    def console_waiting():
-        """(the Console conversations the Console itself puts under "Needs you", {every conversation it listed: its group}).
-        "Needs you" there is a plan to choose or authorise, a run held for you, a turn that did not finish: one entry per
-        conversation, its runs included. Console off or unreadable: nothing listed, so nothing is left to it."""
-        if not (config.MISSIONS_ENABLED and config.MISSIONS.console.enabled):
-            return [], {}
-        try:
-            listing = core("console.list", {})
-        except Exception:  # noqa: BLE001 -- NEEDS YOU then judges those missions itself
-            current_app.logger.warning("Could not read the Console's conversations for NEEDS YOU")
-            return [], {}
-        out, listed = [], {}
-        for conv in listing.get("conversations") or []:
-            if not isinstance(conv, dict) or not isinstance(conv.get("id"), str):
-                continue
-            status = conv.get("status")
-            listed[conv["id"]] = status.get("group") if isinstance(status, dict) else None
-            if isinstance(status, dict) and status.get("group") == "Needs you":
-                out.append({"id": "Console", "title": conv.get("title") or "conversation", "href": f"/console/{conv['id']}",
-                            "meta": status.get("text") or "needs you", "status": "console", "tier": "console"})
-        return out, listed
-
-    def needs_count(windows=None, waiting=_UNREAD):
-        """What NEEDS YOU counts on its sub-tab: plans waiting for approval, rollback windows held for a human, and missions
-        waiting on the operator. Incidents and findings are not decisions, so they are not counted. `windows` and
-        `waiting` are answers the caller already has, so they are not read twice. Core down shows no number; missions
-        that cannot be read leave out only themselves (NEEDS YOU says so), not the plans and windows."""
-        try:
-            plans = len(core("proposal.list_pending", {}) or [])
-            if windows is None:
-                windows = core("canary.candidates", {}) or []
-            if waiting is _UNREAD:                           # None is "could not be read", and is not asked again
-                waiting = waiting_missions()
-            return plans + sum(1 for r in windows if isinstance(r, dict) and r.get("held")) + len(waiting or [])
-        except Exception:  # noqa: BLE001 -- a badge is not worth a failed page
-            return None
+    def needs_count(needs=_UNREAD):
+        """What NEEDS YOU counts: Core's `count` (plans waiting, held rollback windows, missions and conversations waiting on you).
+        Incidents and findings are not decisions. Unknown is no number, never zero."""
+        if needs is _UNREAD:
+            needs = needs_read()
+        count = needs.get("count") if needs else None
+        return count if isinstance(count, int) else None
 
     @app.get("/missions")
     def missions_page():
@@ -1203,17 +1142,17 @@ def register_mission_pages(app, core) -> None:
     def needs_you_page():
         """The old dashboard Actions tab (rc14.7.3): plans to authorise, open rollback windows, incidents and hull
         findings. Works with missions off: none of it needs them."""
-        waiting = waiting_missions()
+        needs = needs_read()
+        waiting = waiting_missions(needs)
         live = {"findings": dashboard_data.summarize_findings(), "rollback_candidates": [], "waiting_missions": waiting}
-        windows = None
         try:
             # Core's database holds the windows; this process may not read it (web_access.py). Core down empties
             # the panel, it never fails the page.
-            windows = live["rollback_candidates"] = core("canary.candidates", {})
+            live["rollback_candidates"] = core("canary.candidates", {})
         except Exception:  # noqa: BLE001 -- see above
             current_app.logger.warning("Could not read the canary rollback windows from core")
         return shell("missions_needs_you.html", page="missions", sub="needs", disabled=False, notice=None,
-                     live=live, needs_count=needs_count(windows, waiting) if windows is not None else None)
+                     live=live, needs_count=needs_count(needs))
 
     @app.get("/missions/<mission_id>")
     def mission_page(mission_id):
@@ -1244,6 +1183,8 @@ def register_mission_pages(app, core) -> None:
                 card = None          # an unavailable card hides the controls; it never blocks reading the mission
         return shell("mission_detail.html", page="missions", disabled=False, m=mission, events=events,
                      view=view, closed=mission["status"] in TERMINAL_STATUSES, card=card,
+                     # Core says whether the Console decides this run (4.2): only the latest run of an open conversation.
+                     in_conversation=bool(mission.get("decided_in_console")),
                      notice=notice_for(_MISSION_NOTICES))
 
     def mission_action(mission_id, method, extra, done):
@@ -1261,7 +1202,7 @@ def register_mission_pages(app, core) -> None:
             if error.code == "bad_request":
                 abort(400)
             notice = error.code if error.code in ("stale", "elevation_required", "unavailable", "invalid_grant",
-                                                  "not_found", "disabled") else "refused"
+                                                  "not_found", "disabled", "in_conversation") else "refused"
         return redirect(url_for("mission_page", mission_id=mission_id, notice=notice))
 
     @app.post("/missions/<mission_id>/approve")
@@ -1288,53 +1229,6 @@ def register_mission_pages(app, core) -> None:
     def mission_keep(mission_id):
         return mission_action(mission_id, "mission.keep", lambda elevated: {}, "kept")
 
-    @app.get("/missions/standing")
-    def standing_page():
-        try:
-            listing = core("standing.list", {"include_inactive": request.args.get("all") == "1"})
-        except RpcError as error:
-            if error.code in ("disabled", "unavailable"):
-                return shell("mission_standing.html", page="missions", disabled=True, notice=None, standing=None)
-            raise
-        return shell("mission_standing.html", page="missions", disabled=False, standing=listing["standing_grants"],
-                     notice=notice_for(_MISSION_NOTICES))
-
-    @app.post("/missions/standing")
-    def standing_create():
-        def listed(name):
-            return [x.strip() for x in request.form.get(name, "").split(",") if x.strip()]
-        try:
-            hours = int(request.form.get("hours", ""))
-        except ValueError:
-            abort(400)
-        deny = listed("deny")
-        elevated = app.elevated_operator() is not None
-        try:
-            core("standing.create", {
-                "operator": g.operator, "scope": {"stacks": listed("stacks"), "services": listed("services")},
-                "ttl_s": hours * 3600, "elevated": elevated, **({"window": {"deny": deny}} if deny else {})})
-            if elevated:
-                app.elevation_acted()
-            notice = "standing_created"
-        except RpcError as error:
-            if error.code == "bad_request":
-                abort(400)
-            notice = error.code if error.code in ("elevation_required", "unavailable", "disabled") else "refused"
-        return redirect(url_for("standing_page", notice=notice))
-
-    @app.post("/missions/standing/<standing_id>/revoke")
-    def standing_revoke(standing_id):
-        if re.fullmatch(r"SG-[0-9]{1,6}-v[0-9]{1,4}", standing_id) is None:
-            abort(404)
-        try:
-            core("standing.revoke", {"operator": g.operator, "standing_id": standing_id})
-            notice = "standing_revoked"
-        except RpcError as error:
-            if error.code == "bad_request":
-                abort(400)
-            notice = error.code if error.code in ("not_found", "unavailable", "disabled") else "refused"
-        return redirect(url_for("standing_page", notice=notice))
-
     @app.post("/missions/<mission_id>/done")
     def mission_done(mission_id):
         """A Console conversation is done (4.0.1, operator): closed as completed, through the Console's own close."""
@@ -1349,7 +1243,9 @@ def register_mission_pages(app, core) -> None:
         except RpcError as error:
             if error.code not in ("conflict", "not_found", "disabled", "unavailable", "invalid"):
                 refuse(error)
-            notice = error.code if error.code in _MISSION_NOTICES else "conflict"
+            # 4.2: the Console's own unavailability has its own words (before, the key was shadowed by the Repair one).
+            notice = ("console_unavailable" if error.code == "unavailable"
+                      else error.code if error.code in _MISSION_NOTICES else "conflict")
         return redirect(url_for("mission_page", mission_id=mission_id, notice=notice))
 
     @app.post("/missions/<mission_id>/cancel")
@@ -1579,7 +1475,12 @@ def index(core=None):
             # The Hull tile's PLANS count. RunStatus.pending_plan_id was the shell planner's
             # signal and nothing writes it any more, so reading it would have reported "0 plans"
             # with approvals genuinely waiting. Same source as /api/approvals.
-            ctx["pending_approvals"] = len(core("proposal.list_pending", {}) or [])
+            # The HULL tile counts what NEEDS YOU counts (4.2): one rule, in Core. Unknown stays unknown.
+            needs = core("needs.list", {})
+            if isinstance(needs, dict) and isinstance(needs.get("count"), int):
+                ctx["pending_approvals"] = needs["count"]
+            elif isinstance(needs, dict) and isinstance(needs.get("plans"), int):
+                ctx["pending_approvals"] = needs["plans"]   # the windows could not be read: the plans waiting still show (review)
         except Exception:  # noqa: BLE001 -- core being down empties one count, it never 500s the page
             current_app.logger.warning("Could not read pending approvals from core")
     ctx["traefik"] = casa_scruffy_net.fetch_traefik_routers()

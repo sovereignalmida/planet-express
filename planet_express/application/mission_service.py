@@ -20,7 +20,6 @@ import json
 import logging
 import re
 import sqlite3
-import threading
 from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, get_args
@@ -29,7 +28,6 @@ from pydantic import ValidationError
 
 from planet_express.core.redact import redact
 from planet_express.core.store import Store
-from planet_express.execution.actions import TargetTimeout
 from planet_express.memory import retrieval as memory_retrieval, store as memory_store
 from planet_express.memory.models import SLUG_RE, Card
 from planet_express.missions import holds
@@ -47,7 +45,6 @@ from planet_express.missions.state import (
     TERMINAL,
     IllegalTransition,
     MissionNotFound,
-    transition,
     transition_in_txn,
 )
 from planet_express.missions.store import MissionStore
@@ -67,7 +64,6 @@ MAX_ARTIFACTS = 50
 RESPONSE_BUDGET = 512 * 1024
 DEFAULT_RUNTIME = "command"
 CREATABLE_TIERS = ("observe", "propose")
-CREATABLE_ORIGINS = ("operator", "incident")
 
 # Defined once; the dashboard imports these rather than keeping copies.
 MISSION_ID_RE = re.compile(r"M-[0-9]{1,9}")
@@ -257,20 +253,7 @@ def _bool(value):
     return value
 
 
-def _dict(value):
-    if not isinstance(value, dict):
-        raise ValueError("expected an object")
-    return value
-
-
-STANDING_ID_RE = re.compile(r"SG-[0-9]{1,6}-v[0-9]{1,4}")
 _PHASE = re.compile(r"(grant|plan|broad_sudo|no_backup|critical:[0-9]{1,6})")
-
-
-def _checks(value):
-    if not isinstance(value, list) or not 1 <= len(value) <= 64 or not all(isinstance(c, dict) for c in value):
-        raise ValueError("expected 1 to 64 verification checks")
-    return value
 
 
 _OPERATOR_CHECK = _pattern(_OPERATOR, "a plain operator name")
@@ -287,18 +270,15 @@ from planet_express.console.telegram import COMMANDS as CONSOLE_COMMANDS  # noqa
 
 class MissionService:
     def __init__(self, store: Store, *, enabled: Callable[[], bool] | bool = False,
-                 incident_context: Callable[[str], dict | None] | None = None,
                  runtime: str = DEFAULT_RUNTIME, budgets: Callable[[], Any] | None = None):
         self.store = store
         self._budgets = budgets          # `missions.budgets.*`, read when a grant is created (so a reload is honoured)
         self.missions = MissionStore(store)
         self._enabled = enabled if callable(enabled) else (lambda: bool(enabled))
-        self._incident_context = incident_context
         self._runtime = runtime
         self.console_api = None          # `console.api.ConsoleApi`, attached by the daemon when missions.console is enabled
         self.console_telegram = None     # `console.telegram.ConsoleTelegram`, attached with it when a Telegram notifier exists
         self.provider_usage = None       # `missions.provider_usage.ProviderUsage`, attached by the daemon when the broker is on
-        self._incident_lock = threading.Lock()
         self.flow: ApprovalFlow | None = None      # attached by the daemon (slice 7a); None: approvals are unavailable
 
     # ── gate ────────────────────────────────────────────────────────────────
@@ -348,6 +328,50 @@ class MissionService:
         missions, cut = _fit(summaries)
         return {"missions": missions, "total": total, "limit": limit, "offset": offset, "truncated": cut}
 
+    # What NEEDS YOU counts among missions (4.2: the rule lives here, in Core, and every count reads it).
+    WAITING_ON_YOU = ("awaiting_decision", "needs_operator", "recovery_required", "paused_tripwire")
+
+    def needs_missions(self) -> dict:
+        """The missions and Console conversations waiting on the operator: a grant to decide, a run held for them, a recovery to
+        choose, a plan to choose or authorise, a turn that did not finish. A Console conversation and its runs are judged by the
+        Console's own grouping (an answered conversation sits in awaiting_decision, which is "your turn to reply"); a run whose
+        conversation shows "Working" or cannot be shown (Console off or unreadable, conversation archived) is judged as a mission,
+        so a held run never drops out of sight. `truncated`: there were more open missions than were read."""
+        self._require_enabled()
+        listed: dict[str, str | None] = {}
+        items: list[dict] = []
+        if self.console_api is not None:
+            try:
+                conversations = self.console_api.list().get("conversations") or []
+            except Exception:
+                log.warning("Could not read the Console's conversations for NEEDS YOU", exc_info=True)
+                conversations = []
+            for conv in conversations:
+                if not isinstance(conv, dict) or not isinstance(conv.get("id"), str):
+                    continue                             # one malformed entry is skipped, never the whole list (review)
+                status = conv.get("status") if isinstance(conv.get("status"), dict) else {}
+                listed[conv["id"]] = status.get("group")
+                if status.get("group") == "Needs you":
+                    items.append({"id": "Console", "title": _text(conv.get("title") or "conversation", 256),
+                                  "href": f"/console/{conv['id']}", "meta": _text(status.get("text") or "needs you", 200),
+                                  "status": "console", "tier": "console"})
+        active = self.list_missions(scope="active", limit=500)
+        waiting = []
+        for m in active["missions"]:
+            if m["status"] not in self.WAITING_ON_YOU:
+                continue
+            owner = m.get("conversation_id")
+            own = owner is not None and m["runtime"] == "console"
+            if own and owner in listed:
+                continue                         # the conversation itself: the Console says whether it needs you
+            if owner is not None and listed.get(owner) == "Needs you":
+                continue                         # a run the Console shows as needing you: listed once, as the conversation
+            if own and m["status"] == "awaiting_decision":
+                continue                         # the conversation itself, answered: your turn to reply, never a decision
+            waiting.append({**m, "href": f"/missions/{m['id']}", "meta": f"{m['status'].replace('_', ' ')} · {m['tier']}"})
+        truncated = bool(active.get("truncated")) or active["total"] > len(active["missions"])
+        return {"missions": waiting + items, "truncated": truncated}
+
     def _owner(self, mission_id: str) -> str | None:
         """The Console conversation a mission belongs to (its own mission, or a run it started), or None."""
         with self.store._connect() as conn:
@@ -385,6 +409,8 @@ class MissionService:
             "artifacts": list(reversed(artifact_events)),
             "spend": self.missions.model_spend([mission_id]),
             "conversation_id": self._owner(mission_id),
+            # The open conversation whose controls act on this run (4.2), or None: the mission page then offers its own.
+            "decided_in_console": self.console_decides(mission_id),
         })
         return out
 
@@ -454,6 +480,9 @@ class MissionService:
     def create_mission(self, *, operator: str, title: str, goal: str, tier: str = "propose",
                        origin: str | None = None, incident_id: str | None = None,
                        success_criteria: str | None = None, scope: dict | None = None) -> dict:
+        """An Observe or Propose mission. No operator surface reaches this since 4.2 (`mission.create` and INVESTIGATE were removed;
+        the Console makes its own missions): it is kept as the service-level constructor the tests build missions with. Do not
+        put it back on the RPC table without the second review."""
         self._require_enabled()
         if tier not in CREATABLE_TIERS:
             raise MissionError(f"Operator surfaces can only create {' or '.join(CREATABLE_TIERS)} missions; "
@@ -502,55 +531,6 @@ class MissionService:
                 insert_event(conn, mission_id, "decision", actor, {"cancel_requested": True}, now)
         return _mission_summary(self._mission(mission_id))
 
-    def investigate_incident(self, incident_id: str, *, operator: str) -> dict:
-        """Create (or return the open) Propose mission for an incident. The goal is a fixed sentence: the
-        incident's own text (event payloads, container output) is attacker-influenced, so it is kept only as
-        DATA in the mission's `incident_evidence` event."""
-        self._require_enabled()
-        if self._incident_context is None:
-            raise MissionError("Incident evidence is unavailable", "unavailable")
-        try:
-            incident = self._incident_context(incident_id)
-        except TargetTimeout:
-            raise MissionError("host slow, retry", "timeout") from None
-        except Exception:  # noqa: BLE001 -- another subsystem's failure; log it, never leak it
-            log.exception("Could not read incident %s for a mission", incident_id)
-            raise MissionError("Could not read the incident", "internal") from None
-        if not isinstance(incident, dict):
-            raise MissionError("Incident not found", "not_found")
-        with self._incident_lock:
-            with self.store._connect() as conn:
-                row = conn.execute(
-                    f"SELECT id FROM missions WHERE incident_id=? AND status NOT IN ({_TERMINAL_SQL}) "
-                    "ORDER BY CAST(SUBSTR(id, 3) AS INTEGER) DESC LIMIT 1", (incident_id,)).fetchone()
-            if row is not None:
-                return {"created": False, "mission": _mission_summary(self.missions.get_mission(row["id"]))}
-            # A fixed sentence either way; an incident on another host says so, or `casalab/radarr` reads like a local
-            # stack/service (review, multi-host release B).
-            remote = incident.get("kind") in ("remote_container", "remote_host")
-            goal = (f"Investigate incident {incident_id}, which is on ANOTHER host (not this one), and propose a diagnosis. "
-                    "PE reads other hosts but does not change them, and this session cannot reach them: work from the "
-                    "incident evidence and the other hosts' state in INVENTORY.md if present. Propose nothing for this host."
-                    if remote else f"Investigate incident {incident_id} and propose a diagnosis")
-            made = self._create_queued(
-                operator=operator, title=f"Investigate incident {incident_id}",
-                goal=goal, tier="propose",
-                origin="incident", incident_id=incident_id,
-                success_criteria="Root cause with evidence and a proposed remediation. Nothing is changed.",
-                scope=None, evidence=self._evidence(incident))
-            return {"created": True, "mission": made}
-
-    @staticmethod
-    def _evidence(incident: dict) -> dict[str, Any]:
-        out: dict[str, Any] = {k: _clip(str(incident[k]), 512)
-                               for k in ("id", "kind", "resource", "summary", "severity", "status", "condition")
-                               if incident.get(k) is not None}
-        events = incident.get("events")
-        if isinstance(events, list):
-            out["events"] = [_clip(json.dumps(redact_value(e), sort_keys=True, default=str), 400)
-                             for e in events[-10:]]
-        return redact_value(out)
-
     # ── memory ──────────────────────────────────────────────────────────────
     def _memory(self, conn) -> None:
         self._require_enabled()
@@ -565,6 +545,18 @@ class MissionService:
                 "SELECT id FROM memory_cards WHERE status=? ORDER BY seq LIMIT ? OFFSET ?",
                 (status, limit, offset))]
             cards = [_card_out(c) for c in (memory_store.get_card(conn, i) for i in ids) if c is not None]
+            # A card a Console conversation offered says so and links there (4.2): one lesson, findable from both places.
+            offered = {}
+            if ids:
+                marks = ",".join("?" * len(ids))
+                try:
+                    offered = {r[0]: {"conversation_id": r[1], "title": _text(r[2], 120)} for r in conn.execute(
+                        "SELECT l.card_id, c.id, c.title FROM console_lessons l JOIN console_conversations c ON c.id = l.conversation_id "
+                        f"WHERE l.card_id IN ({marks})", ids)}
+                except sqlite3.OperationalError:
+                    offered = {}                         # no Console tables on this install
+            for c in cards:
+                c["offered_in"] = offered.get(c["id"])
         cards, cut = _fit(cards)
         return {"cards": cards, "total": total, "limit": limit, "offset": offset, "truncated": cut}
 
@@ -629,41 +621,62 @@ class MissionService:
     def approval_card(self, mission_id: str) -> dict:
         return self._flowed(lambda f: f.card(mission_id))
 
-    def propose_repair(self, *, operator: str, **spec: Any) -> dict:
-        return self._flowed(lambda f: f.propose_repair(_actor(operator), **spec))
+    def _decided_in_conversation(self, mission_id: str) -> None:
+        """One place to act (4.2, docs/designs/missions-memory.md): a run a Console conversation started is approved, denied, checked
+        again, kept and rolled back in that conversation, which tells its thread what happened. The dashboard's mission page and
+        Telegram's /approve, /deny and /rollback refuse it and say where to go. With the Console off, nothing can show the
+        conversation, so the mission is decided here as before. Cancel is not a decision and stays (the Console cannot stop a run)."""
+        owner = self.console_decides(mission_id)
+        if owner is not None:
+            raise MissionError(f"{mission_id} is a run of a Console conversation: decide it in the conversation "
+                               f"(/console/{owner}).", "in_conversation")
+
+    def console_decides(self, mission_id: str) -> str | None:
+        """The open Console conversation whose controls act on this run, or None. The Console shows and acts on a conversation's
+        latest run only, and only while the conversation is open: an earlier run (its Undo, a hold) and a run a closed or archived
+        conversation left behind are decided on their mission page, as before 4.2 (review). With the Console off, none."""
+        if self.console_api is None:
+            return None
+        with self.store._connect() as conn:
+            try:
+                row = conn.execute("SELECT conversation_id FROM console_executions WHERE mission_id=?", (mission_id,)).fetchone()
+                if row is None:
+                    return None
+                latest = conn.execute(
+                    "SELECT mission_id FROM console_executions WHERE conversation_id=? AND status IN ('proposed', 'authorised', 'ended') "
+                    "ORDER BY id DESC LIMIT 1", (row[0],)).fetchone()
+                conv = conn.execute("SELECT * FROM console_conversations WHERE id=?", (row[0],)).fetchone()
+            except sqlite3.OperationalError:
+                return None                              # no Console tables on this install
+        if latest is None or latest[0] != mission_id or conv is None:
+            return None
+        try:
+            own_status = self._mission(conv["mission_id"]).status
+        except MissionError:
+            return None                                  # unreadable: the mission page decides, never a run nobody can reach
+        # `console.store.is_closed`, the Console's one rule: archived or archiving, or its own mission finished.
+        return None if conv["state"] != "open" or own_status in TERMINAL_STATUSES else conv["id"]
 
     def approve_mission(self, mission_id: str, *, operator: str, phase: str, grant_hash: str, elevated: bool = False) -> dict:
+        self._decided_in_conversation(mission_id)
         return self._flowed(lambda f: f.approve(_actor(operator), mission_id, phase, grant_hash, elevated=elevated))
 
     def deny_mission(self, mission_id: str, *, operator: str, grant_hash: str) -> dict:
+        self._decided_in_conversation(mission_id)
         return self._flowed(lambda f: f.deny(_actor(operator), mission_id, grant_hash))
 
     def rollback_mission(self, mission_id: str, *, operator: str, ack_drift: bool = False) -> dict:
+        self._decided_in_conversation(mission_id)
         return self._flowed(lambda f: f.roll_back(_actor(operator), mission_id, ack_drift=ack_drift))
 
     def recheck_mission(self, mission_id: str, *, operator: str) -> dict:
+        self._decided_in_conversation(mission_id)
         return self._flowed(lambda f: f.recheck(_actor(operator), mission_id))
 
     def keep_mission(self, mission_id: str, *, operator: str) -> dict:
+        self._decided_in_conversation(mission_id)
         return self._flowed(lambda f: f.keep_and_close(_actor(operator), mission_id))
 
-    def standing_create(self, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
-                        elevated: bool = False, ceilings: dict | None = None) -> dict:
-        return self._flowed(lambda f: f.standing_create(_actor(operator), scope=scope, ttl_s=ttl_s, window_spec=window,
-                                                        elevated=elevated, ceilings=ceilings))
-
-    def standing_supersede(self, grant_id: str, *, operator: str, scope: dict, ttl_s: int, window: dict | None = None,
-                           elevated: bool = False, ceilings: dict | None = None) -> dict:
-        return self._flowed(lambda f: f.standing_supersede(_actor(operator), grant_id, scope=scope, ttl_s=ttl_s,
-                                                           window_spec=window, elevated=elevated, ceilings=ceilings))
-
-    def standing_revoke(self, grant_id: str, *, operator: str) -> dict:
-        return self._flowed(lambda f: f.standing_revoke(_actor(operator), grant_id))
-
-    def standing_list(self, *, include_inactive: bool = False) -> dict:
-        return self._flowed(lambda f: f.standing_list(include_inactive=include_inactive))
-
-    # ── RPC ─────────────────────────────────────────────────────────────────
     def provider_usage_view(self) -> dict[str, Any]:
         """Credit and spend as the model provider reports them (rc14.7), or why there are none."""
         if self.provider_usage is None:
@@ -701,20 +714,9 @@ class MissionService:
             return self.mission_events(**_params(p, mid, {"after_seq": _int(0, 2**62),
                                                           "limit": _int(1, MAX_EVENT_PAGE), "tail": _bool}))
 
-        def create(p):
-            return self.create_mission(**_params(
-                p, {**op, "title": _str(256), "goal": _str(8192)},
-                {"tier": _choice(*CREATABLE_TIERS, "repair", "change", "critical"),
-                 "origin": _choice(*CREATABLE_ORIGINS), "incident_id": _pattern(INCIDENT_ID_RE, "an incident id"),
-                 "success_criteria": _str(8192), "scope": _dict}))
-
         def cancel(p):
             v = _params(p, {**mid, **op})
             return self.cancel_mission(v["mission_id"], operator=v["operator"])
-
-        def from_incident(p):
-            v = _params(p, {"incident_id": _pattern(INCIDENT_ID_RE, "an incident id"), **op})
-            return self.investigate_incident(v["incident_id"], operator=v["operator"])
 
         def candidates(p):
             return self.memory_candidates(**_params(p, {}, _PAGE))
@@ -743,19 +745,9 @@ class MissionService:
 
         elev = {"elevated": _bool}
         grant_hash = {"grant_hash": _pattern(re.compile(r"[0-9a-f]{64}"), "a grant hash")}
-        standing_id = {"standing_id": _pattern(STANDING_ID_RE, "a standing grant id")}
-        scope_t = {"scope": _dict, "ttl_s": _int(60, 30 * 86400)}
 
         def card_(p):
             return self.approval_card(_params(p, mid)["mission_id"])
-
-        def propose_repair(p):
-            return self.propose_repair(**_params(
-                p, {**op, "title": _str(256), "goal": _str(8192), "scope": _dict, "checks": _checks},
-                {"success_criteria": _str(8192), "budgets": _dict,
-                 "credentials": _tags, "on_verify_fail": _choice("needs_operator", "rollback"),
-                 "incident_id": _pattern(INCIDENT_ID_RE, "an incident id"),
-                 "standing_grant_id": _pattern(STANDING_ID_RE, "a standing grant id")}))
 
         def approve(p):
             v = _params(p, {**mid, **op, **grant_hash, "phase": _pattern(_PHASE, "an approval phase")}, elev)
@@ -778,34 +770,16 @@ class MissionService:
             v = _params(p, {**mid, **op})
             return self.keep_mission(v["mission_id"], operator=v["operator"])
 
-        def standing_create(p):
-            v = _params(p, {**op, **scope_t}, {"window": _dict, "ceilings": _dict, **elev})
-            return self.standing_create(operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
-                                        window=v.get("window"), elevated=v.get("elevated", False), ceilings=v.get("ceilings"))
-
-        def standing_supersede(p):
-            v = _params(p, {**op, **standing_id, **scope_t}, {"window": _dict, "ceilings": _dict, **elev})
-            return self.standing_supersede(v["standing_id"], operator=v["operator"], scope=v["scope"], ttl_s=v["ttl_s"],
-                                           window=v.get("window"), elevated=v.get("elevated", False),
-                                           ceilings=v.get("ceilings"))
-
-        def standing_revoke(p):
-            v = _params(p, {**op, **standing_id})
-            return self.standing_revoke(v["standing_id"], operator=v["operator"])
-
-        def standing_list(p):
-            return self.standing_list(**_params(p, {}, {"include_inactive": _bool}))
-
         def provider_usage(p):
             _params(p, {})
             return self.provider_usage_view()
 
-        table = {"mission.provider_usage": provider_usage, "mission.approval_card": card_, "mission.propose_repair": propose_repair, "mission.approve": approve,
-                 "mission.deny": deny, "mission.rollback": rollback, "mission.recheck": recheck, "mission.keep": keep, "standing.create": standing_create,
-                 "standing.supersede": standing_supersede, "standing.revoke": standing_revoke,
-                 "standing.list": standing_list,
-                 "mission.list": list_, "mission.get": get, "mission.events": events, "mission.create": create,
-                 "mission.cancel": cancel, "mission.from_incident": from_incident,
+        # 4.2: standing.*, mission.create, mission.from_incident and mission.propose_repair are gone (no caller: the Console makes
+        # conversations and their runs in Core itself; standing grants never had an effect).
+        table = {"mission.provider_usage": provider_usage, "mission.approval_card": card_, "mission.approve": approve,
+                 "mission.deny": deny, "mission.rollback": rollback, "mission.recheck": recheck, "mission.keep": keep,
+                 "mission.list": list_, "mission.get": get, "mission.events": events,
+                 "mission.cancel": cancel,
                  "memory.candidates": candidates, "memory.cards": cards, "memory.review_due": review_due,
                  "memory.confirm": confirm, "memory.reverify": reverify, "memory.deprecate": deprecate, "memory.search": search}
         handlers = {name: wrap(fn) for name, fn in table.items()}
@@ -949,6 +923,10 @@ class MissionService:
         mission_id = args[0]
         try:
             self._require_enabled()
+            owner = self.console_decides(mission_id) if cmd != "/mission_card" else None
+            if owner is not None:
+                return (f"{mission_id} is a run of a Console conversation: decide it there. /plan {owner[:8]} shows it; "
+                        f"/authorise, /withdraw and /run {owner[:8]} rollback|recheck|keep act on it.")
             if cmd == "/mission_card":
                 return _render_card(self.approval_card(mission_id))
             card = self.approval_card(mission_id)

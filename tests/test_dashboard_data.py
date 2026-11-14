@@ -359,7 +359,7 @@ def test_a_missing_findings_snapshot_does_not_swallow_a_pending_approval():
     ctx["findings"] = {"available": False, "list": [], "counts": {}}
     ctx["pending_approvals"] = 1
     tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
-    assert tiles["hull"]["hero"] == "1 PLAN WAITING"
+    assert tiles["hull"]["hero"] == "1 NEEDS YOU"
     assert tiles["hull"]["level"] == "warn"
     assert tiles["hull"]["show_pills"] is True
     # ...and it must not invent a clean bill of health for the counts it cannot see.
@@ -409,7 +409,7 @@ def test_pending_approvals_come_from_core_not_the_retired_run_status_field():
     ctx["pending_approvals"] = 2
     tiles = dashboard_data.summarize_overview_tiles(ctx, {"available": False}, {"available": False})
     assert tiles["hull"]["plans"] == 2
-    assert tiles["hull"]["hero"] == "2 PLANS WAITING"
+    assert tiles["hull"]["hero"] == "2 NEED YOU"
     assert tiles["hull"]["level"] == "warn"
 
 

@@ -670,8 +670,8 @@ class MissionsConfig(BaseModel):
     hooks: MissionHooksConfig = MissionHooksConfig()
     model_broker: ModelBrokerConfig = ModelBrokerConfig()
     console: MissionConsoleConfig = MissionConsoleConfig()
-    # Named time windows for standing grants (`window.deny: [backup]` resolves here when the grant is created). Each entry is
-    # `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]` (see missions/window.py).
+    # Named time windows for standing grants. Standing grants were removed in 4.2: the key is still accepted, so a config that sets
+    # it stays valid, and it has no effect. Each entry is `HH:MM-HH:MM` (UTC), `day[,day]@HH:MM-HH:MM` or `day[,day]`.
     windows: dict[str, list[str]] = {}
     # The supplementary groups EVERY session is started with, whatever its tier (trust mode): `docker` (the real socket),
     # `pe-session` (the one sudoers rule setup writes), `adm` (/var/log) and `systemd-journal` (journalctl). Any group name;

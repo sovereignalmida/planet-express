@@ -1,16 +1,16 @@
 """The approval flow (v4 slice 7a): proposing a Repair mission, the approval card, approve and deny bound to the grant hash,
-standing grants, and the operator's rollback of a Repair mission.
+and the operator's rollback of a Repair mission (standing grants were removed in 4.2).
 
 Everything here takes an ACTOR that the caller built from the authenticated dashboard or Telegram identity
 (`operator:<name>`); there is no parameter anywhere that lets a request name its own actor. Approval is proven only by a
 `mission_approvals` row (`approvals.record_approval`), bound to the hash the operator saw; editing the grant afterwards changes
-the hash and every earlier row stops matching. An unattended start is decided solely by `approvals.evaluate`, through
-`start_under_standing`, and recorded on the mission with `standing_grant_id`.
+the hash and every earlier row stops matching. Standing grants (an unattended start) were removed in 4.2: nothing attached one to a
+mission, and nothing here can now.
 """
 
 import logging
 import sqlite3
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from typing import Any
 
 from pydantic import ValidationError
@@ -18,32 +18,27 @@ from pydantic import ValidationError
 from planet_express.core.redact import redact
 from planet_express.core.store import Store
 
-from . import approvals, window
+from . import approvals
 from .approvals import ApprovalConflict, phase_demands_elevation, record_approval
 from .canonical import CanonicalError, loads_strict
 from .events import insert_event
 from .models import (
     LEGACY_GRANT_TEXT,
-    LEGACY_STANDING_TEXT,
     Budgets,
     Grant,
     GrantScope,
     Mission,
-    StandingCeilings,
     VerificationPlan,
     is_legacy_grant,
-    is_legacy_standing,
 )
 from .state import IllegalTransition, MissionNotFound, transition, transition_in_txn
-from .store import MissionStore, StandingGrantInactive
+from .store import MissionStore
 from .verify.plan import PlanInvalid, validate_plan
 
 log = logging.getLogger("planetexpress.missions.approval_flow")
 
-MAX_STANDING_TTL_S = 30 * 86400
 MAX_LIST = 100
 MAX_CARD_TEXT = 2000
-STANDING_TIERS = ("repair",)
 OPERATOR_PREFIX = "operator:"
 GrantValidator = Callable[[Grant, VerificationPlan], list[str]]
 
@@ -143,14 +138,12 @@ def build_card(store: Store, mission: Mission) -> dict[str, Any]:
 
 class ApprovalFlow:
     def __init__(self, store: Store, *, supervisor: Any = None, validator: GrantValidator | None = None,
-                 budgets: Callable[[], Budgets] | None = None,
-                 named_windows: Callable[[], Mapping[str, Any]] | None = None, runtime: str = "command"):
+                 budgets: Callable[[], Budgets] | None = None, runtime: str = "command"):
         self.store = store
         self.ms = MissionStore(store)
         self.supervisor = supervisor
         self.validator = validator                  # None: no Repair mission can be proposed (nothing could validate it)
         self.budgets = budgets
-        self.named_windows = named_windows or dict
         self.runtime = runtime
 
     # ── helpers ─────────────────────────────────────────────────────────────
@@ -176,23 +169,10 @@ class ApprovalFlow:
     # ── proposing ───────────────────────────────────────────────────────────
     def propose_repair(self, actor: str, *, title: str, goal: str, scope: dict, checks: list[dict],
                        success_criteria: str | None = None, budgets: dict | None = None, credentials: list[str] | None = None,
-                       on_verify_fail: str = "needs_operator", incident_id: str | None = None, standing_grant_id: str | None = None,
-                       _internal: bool = False) -> dict[str, Any]:
+                       on_verify_fail: str = "needs_operator", incident_id: str | None = None) -> dict[str, Any]:
         """Create a Repair mission waiting in `awaiting_decision` with its approval card. The grant is validated by Core
-        (scope within the inventory, budgets within site maximums, a known verification plan) BEFORE anyone is asked.
-        With `standing_grant_id` the unattended path runs (`approvals.evaluate`); a refusal there is NOT an error: the mission
-        is made without the standing grant and the card says why, so an operator decides instead."""
-        # Two ways to name a standing grant: Core's own automation (`start_under_standing`, actor "core": nobody is asked) and
-        # an operator proposing a repair for an incident under a standing grant (the proposer is authenticated and recorded;
-        # whether an approval is still needed is decided by `approvals.evaluate`, never by the proposer).
-        unattended = standing_grant_id is not None
-        if actor == "core":
-            if not _internal or standing_grant_id is None:
-                raise FlowError("this is an operator decision", "forbidden")
-        else:
-            require_actor(actor)
-        if unattended and not incident_id:
-            raise FlowError("a standing grant covers incident-backed missions only", "forbidden")
+        (scope within the inventory, budgets within site maximums, a known verification plan) BEFORE anyone is asked."""
+        require_actor(actor)
         if self.validator is None:
             raise FlowError("Repair missions are not configured on this host", "unavailable")
         try:
@@ -244,45 +224,16 @@ class ApprovalFlow:
         except Exception:
             self._cancel_quietly(mission.id)
             raise
-        decision: dict[str, Any] = {"unattended": False, "reasons": []}
-        if unattended:
-            decision = self._attach_standing(mission.id, standing_grant_id)
         mission = self.ms.get_mission(mission.id)
         self.ms.append_event(mission.id, "decision", "core", {
-            "event": "approval.requested", "grant_hash": mission.grant_hash, "tier": mission.tier,
-            "by": who, "standing": mission.standing_grant_id, "standing_refused": decision["reasons"]})
-        return {"mission_id": mission.id, "status": mission.status, "grant_hash": mission.grant_hash,
-                "unattended": decision["unattended"], "standing_refused": decision["reasons"]}
+            "event": "approval.requested", "grant_hash": mission.grant_hash, "tier": mission.tier, "by": who})
+        return {"mission_id": mission.id, "status": mission.status, "grant_hash": mission.grant_hash}
 
     def _cancel_quietly(self, mission_id: str) -> None:
         try:
             transition(self.store, mission_id, "cancelled", "core")
         except Exception:                           # noqa: BLE001
             log.warning("could not cancel the half-made mission %s", mission_id)
-
-    def _attach_standing(self, mission_id: str, standing_id: str) -> dict[str, Any]:
-        """Atomically: name the standing grant on the mission, ask the one predicate, keep it only if it holds. Refusal detaches
-        it again in the same transaction, so a mission is never observable half-way and an operator's approval path stays open."""
-        now = int(self.store._clock())
-        with self.store._write() as conn:
-            conn.execute("UPDATE missions SET standing_grant_id=?, updated_at=? WHERE id=?", (standing_id, now, mission_id))
-            verdict = approvals.evaluate(conn, mission_id, now)
-            if verdict.ok:
-                insert_event(conn, mission_id, "decision", "core",
-                             {"event": "standing.accepted", "standing_grant_id": standing_id}, now)
-                return {"unattended": True, "reasons": []}
-            conn.execute("UPDATE missions SET standing_grant_id=NULL, updated_at=? WHERE id=?", (now, mission_id))
-            reasons = [_clip(r, 200) for r in verdict.reasons][:8]
-            insert_event(conn, mission_id, "decision", "core",
-                         {"event": "standing.refused", "standing_grant_id": standing_id, "reasons": reasons}, now)
-            return {"unattended": False, "reasons": reasons}
-
-    def start_under_standing(self, standing_grant_id: str, **kwargs: Any) -> dict[str, Any]:
-        """The unattended path: same proposal, no operator. In scope, incident-backed, unexpired, unrevoked and outside any
-        denied window it is accepted (the supervisor then starts it); otherwise it waits as an ordinary approval card."""
-        if not kwargs.get("incident_id"):
-            raise FlowError("a standing grant covers incident-backed missions only", "forbidden")
-        return self.propose_repair("core", standing_grant_id=standing_grant_id, _internal=True, **kwargs)
 
     # ── deciding ────────────────────────────────────────────────────────────
     def approve(self, actor: str, mission_id: str, phase: str, bound_hash: str, *, elevated: bool = False) -> dict[str, Any]:
@@ -415,129 +366,5 @@ class ApprovalFlow:
             return bool(sup is not None and sup.rollback_in_flight(mission_id))
         except Exception:                                  # noqa: BLE001 - a status read never breaks the page
             return False
-
-    # ── standing grants ─────────────────────────────────────────────────────
-    def _window(self, raw: dict | None) -> dict | None:
-        try:
-            parsed = window.resolve_names(raw, dict(self.named_windows())) if raw else None
-        except (TypeError, ValueError):
-            raise FlowError("Invalid window") from None
-        bad = window.unreadable(parsed)
-        if bad:
-            raise FlowError("The window holds entries that are not times: " + ", ".join(b[:40] for b in bad[:4]))
-        return parsed
-
-    def _check_standing(self, scope: dict, tier: str, ttl_s: int, window_raw: dict | None) -> tuple[dict, dict | None, int]:
-        if tier not in STANDING_TIERS:
-            raise FlowError("Standing grants cover the repair tier only, never change or critical", "forbidden")
-        if not isinstance(ttl_s, int) or isinstance(ttl_s, bool) or not 60 <= ttl_s <= MAX_STANDING_TTL_S:
-            raise FlowError(f"A standing grant must expire within {MAX_STANDING_TTL_S // 86400} days (and last at least a minute)")
-        try:
-            scope_model = GrantScope.model_validate(scope)
-        except ValidationError:
-            raise FlowError("Invalid scope") from None
-        if not (scope_model.stacks or scope_model.services):
-            raise FlowError("A standing grant needs a non-empty scope")
-        return scope_model.model_dump(mode="json"), self._window(window_raw), int(self.store._clock()) + ttl_s
-
-    @staticmethod
-    def _ceilings(raw: dict | None) -> dict | None:
-        if raw is None:
-            return None
-        try:
-            return StandingCeilings.load(raw).model_dump(mode="json")
-        except ValidationError:
-            raise FlowError("Invalid ceilings") from None
-
-    def standing_create(self, actor: str, *, scope: dict, ttl_s: int, window_spec: dict | None = None,
-                        tier: str = "repair", elevated: bool = False, ceilings: dict | None = None) -> dict[str, Any]:
-        actor = require_actor(actor)
-        if elevated is not True:
-            raise FlowError("Creating a standing grant needs an elevated dashboard session", "elevation_required")
-        scope_d, win, expires = self._check_standing(scope, tier, ttl_s, window_spec)
-        ceilings = self._ceilings(ceilings)
-        for _attempt in range(8):
-            with self.store._connect() as conn:
-                n = conn.execute("SELECT COUNT(*) FROM standing_grants").fetchone()[0] + 1
-                while conn.execute("SELECT 1 FROM standing_grants WHERE id LIKE ?", (f"SG-{n}-v%",)).fetchone():
-                    n += 1
-            grant_id = f"SG-{n}-v1"
-            try:
-                self.ms.create_standing_grant(grant_id=grant_id, scope=scope_d, tier=tier, created_by=actor,
-                                              expires_at=expires, window=win, version=1, ceilings=ceilings)
-                break
-            except sqlite3.IntegrityError:               # a concurrent create took this number between the read and the insert
-                continue
-        else:
-            raise FlowError("Could not allocate a standing grant id; try again", "conflict")
-        self._audit("mission.standing_created", standing=grant_id, operator=actor, expires_at=expires)
-        return self._standing_row(grant_id)
-
-    def standing_supersede(self, actor: str, grant_id: str, *, scope: dict, ttl_s: int, window_spec: dict | None = None,
-                           elevated: bool = False, ceilings: dict | None = None) -> dict[str, Any]:
-        """A changed standing grant is a NEW version: the old one is revoked in the same step, so a mission can never start
-        under a version nobody currently stands behind."""
-        actor = require_actor(actor)
-        if elevated is not True:
-            raise FlowError("Changing a standing grant needs an elevated dashboard session", "elevation_required")
-        with self.store._connect() as conn:
-            old = conn.execute("SELECT * FROM standing_grants WHERE id=?", (grant_id,)).fetchone()
-        if old is None:
-            raise FlowError("Standing grant not found", "not_found")
-        if old["revoked_at"] is not None:
-            raise FlowError("That standing grant version is already revoked", "conflict")
-        scope_d, win, expires = self._check_standing(scope, old["tier"], ttl_s, window_spec)
-        ceilings = self._ceilings(ceilings)
-        base = grant_id.rsplit("-v", 1)[0]
-        new_id = f"{base}-v{old['version'] + 1}"
-        try:
-            self.ms.supersede_standing_grant(old_id=grant_id, grant_id=new_id, scope=scope_d, tier=old["tier"], created_by=actor,
-                                             expires_at=expires, window=win, version=old["version"] + 1, ceilings=ceilings)
-        except sqlite3.IntegrityError:
-            raise FlowError("That version already exists", "conflict") from None
-        except StandingGrantInactive:
-            raise FlowError("That standing grant version was revoked meanwhile", "conflict") from None
-        self._audit("mission.standing_superseded", standing=new_id, replaces=grant_id, operator=actor)
-        return self._standing_row(new_id)
-
-    def standing_revoke(self, actor: str, grant_id: str) -> dict[str, Any]:
-        actor = require_actor(actor)
-        with self.store._connect() as conn:
-            if conn.execute("SELECT 1 FROM standing_grants WHERE id=?", (grant_id,)).fetchone() is None:
-                raise FlowError("Standing grant not found", "not_found")
-        self.ms.revoke_standing_grant(grant_id)          # idempotent; takes effect for every later start at once
-        self._audit("mission.standing_revoked", standing=grant_id, operator=actor)
-        return self._standing_row(grant_id)
-
-    def _standing_row(self, grant_id: str) -> dict[str, Any]:
-        with self.store._connect() as conn:
-            row = conn.execute("SELECT * FROM standing_grants WHERE id=?", (grant_id,)).fetchone()
-        now = int(self.store._clock())
-        scope = loads_strict(row["scope_json"])
-        legacy = is_legacy_standing(scope)
-        ceilings = scope.pop("ceilings", None)
-        state = "revoked" if row["revoked_at"] is not None else ("expired" if row["expires_at"] <= now else "active")
-        # Active, and yet not starting runs right now: outside its window, or made before trust mode. The page said ACTIVE while the
-        # predicate refused (rc14.7.10, state-machines.md M9); the same window rule decides both.
-        not_now = None
-        if state == "active":
-            problems = approvals.standing_row_problems(row, now)       # the predicate's own rule for the grant itself
-            not_now = ("it was made before an update and will not start runs" if legacy
-                       else ("not now: " + "; ".join(problems)) if problems else None)
-        return {"id": row["id"], "version": row["version"], "tier": row["tier"], "state": state, "not_now": not_now,
-                "legacy": legacy, "legacy_text": (LEGACY_STANDING_TEXT[0].upper() + LEGACY_STANDING_TEXT[1:]) if legacy else None,
-                "scope": scope, "ceilings": ceilings, "window": loads_strict(row["window_json"]) if row["window_json"] else None,
-                "created_by": row["created_by"], "created_at": row["created_at"], "expires_at": row["expires_at"],
-                "revoked_at": row["revoked_at"]}
-
-    def standing_list(self, *, include_inactive: bool = False, limit: int = MAX_LIST) -> dict[str, Any]:
-        with self.store._connect() as conn:
-            rows = conn.execute("SELECT id FROM standing_grants ORDER BY created_at DESC, id DESC LIMIT ?",
-                                (min(limit, MAX_LIST),)).fetchall()
-        out = [self._standing_row(r["id"]) for r in rows]
-        if not include_inactive:
-            out = [r for r in out if r["state"] == "active"]
-        return {"standing_grants": out}
-
 
 __all__ = ["ApprovalFlow", "FlowError", "build_card", "require_actor", "required_phases"]

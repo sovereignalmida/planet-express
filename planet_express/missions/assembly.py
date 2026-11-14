@@ -143,7 +143,7 @@ def build_approval_flow(store: Store, cfg: Any, runner: Any, controls: RepairCon
         store, supervisor=runner.supervisor, validator=controls.validator,
         budgets=lambda: Budgets(wall_s=min(cfg.budgets.wall_seconds, 86400 * 7), tool_calls=min(cfg.budgets.tool_calls, 100000),
                                 output_bytes=min(cfg.budgets.output_bytes, 2**40), retries=min(cfg.budgets.retries, 100)),
-        named_windows=lambda: dict(cfg.windows), runtime=runtime)
+        runtime=runtime)
 
 
 __all__ = ["RepairControls", "RepairWiring", "build_approval_flow", "build_repair_controls", "discover_inventory",

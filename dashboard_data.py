@@ -866,7 +866,7 @@ def _hull_hero(total_findings: int, pending: int, plans_known: bool) -> str:
     if total_findings:
         return f"{total_findings} FINDING{'' if total_findings == 1 else 'S'}"
     if pending:
-        return f"{pending} PLAN{'' if pending == 1 else 'S'} WAITING"
+        return f"{pending} NEED{'S' if pending == 1 else ''} YOU"
     return "ALL NOMINAL" if plans_known else "NO FINDINGS"
 
 
@@ -969,7 +969,7 @@ def summarize_overview_tiles(ctx: dict, routers: dict, adguard: dict) -> dict:
             # overclaiming here is how an operator stops reading the tile. And with no findings
             # but approvals waiting, the thing that wants you is the approval, not a "0".
             "hero": _hull_hero(total_findings, pending, plans_known),
-            "sub": f"{counts.get('critical', 0)} CRIT · {counts.get('high', 0)} HIGH · {pending} PLANS",
+            "sub": f"{counts.get('critical', 0)} CRIT · {counts.get('high', 0)} HIGH · {pending} NEED YOU",
             "note": "actions ›", "critical": counts.get("critical", 0),
             "high": counts.get("high", 0), "plans": pending if plans_known else "?",
             "show_pills": True,
