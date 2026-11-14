@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.1.0] - 2026-11-13
+
+### Changed
+- **Missions › RECORD replaces the status board** (`docs/designs/missions-memory.md`, release 2). One row per piece of work,
+  newest first, whatever started it: a Console conversation with its runs nested under it (outcome, model calls and cost
+  for the whole conversation), a mission no conversation owns, and every v3 approval (a plan from a scan, a dashboard or
+  Telegram action, a safe prune) with its execution, denied and expired ones included. A night of canary updates is one row
+  with each service under it and Zoidberg's line for it (old image → new, or why it failed). Filters: questions or changes,
+  outcome, where it started. It works with missions off. Core answers it (`record.list`, read-only, rebuilt at most every
+  15 seconds; the worker cannot call it); no schema change. Outcomes come from PE's own rows: a canary that put the old image
+  back is a rollback (read from the engine's step, so it outlives Zoidberg's 200-line history), an interrupted rollback is a
+  failure, a turn running or held names its conversation, and a cost missing some prices says so.
+- **DEPLOYMENTS moved from Memory to Missions › UPDATES** (`/memory/deployments` redirects). Memory is what PE knows; it
+  is now only shown with missions on.
+
 ## [4.0.1] - 2026-11-13
 
 ### Fixed

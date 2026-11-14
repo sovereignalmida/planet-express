@@ -21,7 +21,7 @@ companion for when you are away: scan reports, approve-or-cancel cards and quick
 - **Routes for every host.** Traefik on this host sees only this host's containers. PE turns the other hosts' Traefik
   labels into routes, carefully, so one proxy serves the whole lab.
 
-**Status:** 4.0.1, dogfooded every day on the author's five-machine homelab.
+**Status:** 4.1.0, dogfooded every day on the author's five-machine homelab.
 See [CHANGELOG.md](CHANGELOG.md).
 
 ## The dashboard
@@ -29,7 +29,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 <table>
 <tr>
 <td width="50%"><a href="docs/screenshots/console.png"><img src="docs/screenshots/console.png" alt="Console"></a><br><sub><b>Console</b>: ask about your homelab in plain words. The agent works on the host with your access, every command is on the record beside the answer, and a change only happens through a plan you confirm.</sub></td>
-<td width="50%"><a href="docs/screenshots/missions.png"><img src="docs/screenshots/missions.png" alt="Missions"></a><br><sub><b>Missions</b>: every investigation and repair, by outcome. NEEDS YOU holds what wants a decision. The provider's credit and spend are shown; nothing stops at any figure, you decide.</sub></td>
+<td width="50%"><a href="docs/screenshots/missions.png"><img src="docs/screenshots/missions.png" alt="Missions"></a><br><sub><b>Missions</b>: the record of everything PE changed or looked into, newest first, whatever started it: conversations and their runs, approved plans, canary updates, safe prunes. NEEDS YOU holds what wants a decision. The provider's credit and spend are shown; nothing stops at any figure, you decide.</sub></td>
 </tr>
 <tr>
 <td width="50%"><a href="docs/screenshots/hosts.png"><img src="docs/screenshots/hosts.png" alt="Hosts"></a><br><sub><b>Hosts</b>: this host and every other one: CPU, memory, disk, temperature, containers and their routes. Read over SSH with three fixed read-only commands; an appliance without Docker gets metrics only.</sub></td>
@@ -41,7 +41,7 @@ See [CHANGELOG.md](CHANGELOG.md).
 </tr>
 </table>
 
-Also there: **Memory** (lessons the agent offers and you confirm, and the update history) and **Config** (edit
+Also there: **Memory** (lessons the agent offers and you confirm) and **Config** (edit
 `config.yaml` from the browser; sensitive keys stay locked to the host). A `/api/widget` endpoint serves the status
 to a [Homepage](https://gethomepage.dev) dashboard.
 
@@ -130,7 +130,7 @@ gets an independent second review. [CHANGELOG.md](CHANGELOG.md) lists what those
 
 ## Project status
 
-`main` is the latest release (4.0.1). Development continues on `v4-next`, where release candidates are tagged and run on the
+`main` is the latest release (4.1.0). Development continues on `v4-next`, where release candidates are tagged and run on the
 author's homelab before they reach `main`. `v3-production` keeps the v3 line for emergency fixes.
 
 ## License

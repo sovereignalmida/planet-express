@@ -1036,7 +1036,7 @@ def test_actions_splits_what_wants_you_from_what_is_wrong(tmp_path, monkeypatch)
     assert re.findall(r'id="([a-z-]+-panel)"', columns[1]) == [
         "incident-panel", "hull-diagnostics-panel"]
     assert 'id="manifest-panel"' not in html
-    assert 'id="manifest-panel"' in _client().get("/memory/deployments").data.decode()
+    assert 'id="manifest-panel"' in _client().get("/missions/updates").data.decode()
 
 
 def test_the_actions_panels_are_not_themselves_tab_panels(tmp_path, monkeypatch):
@@ -1144,7 +1144,7 @@ def test_the_actions_docks_survive_a_snapshot_refresh(tmp_path, monkeypatch):
 def test_the_manifest_is_still_refreshed_even_though_it_left_the_live_region(tmp_path, monkeypatch):
     """It renders below the docks, so it cannot live inside #dashboard-live — the refresh has to
     swap it by id instead, or it would be the one panel that silently stopped updating."""
-    html = _render_with_certs(tmp_path, monkeypatch, [], path="/memory/deployments")
+    html = _render_with_certs(tmp_path, monkeypatch, [], path="/missions/updates")
     assert 'id="manifest-panel"' in html
     script = (Path(__file__).resolve().parent.parent / "static" / "panels.js").read_text()
     assert '"manifest-panel"' in re.search(r"var LIVE_PANELS = \[(.*?)\];", script, re.DOTALL).group(1)
@@ -1203,7 +1203,7 @@ def test_history_renders_run_cards_beside_a_detail_pane(tmp_path, monkeypatch):
                         lambda: {"available": False, "routers": []})
     monkeypatch.setattr(casa_scruffy.casa_scruffy_net, "fetch_adguard_stats",
                         lambda: {"available": False})
-    html = _client().get("/memory/deployments").data.decode()
+    html = _client().get("/missions/updates").data.decode()
     assert 'class="history-split"' in html
     assert 'id="deploy-manifest"' in html and 'id="run-detail"' in html
 
@@ -1244,10 +1244,11 @@ def test_the_header_still_wraps_before_the_single_row_runs_out_of_space(tmp_path
     narrow = css[css.index("@media (max-width: 1560px)"):]
     assert "flex-wrap: wrap" in narrow
     assert "overflow-x: auto" in narrow
-    # Eight tabs with the Console off, nine with it on (rc14.7.3 dropped Actions, History and Chat and made
-    # Missions and Memory permanent). A tenth needs the measurement redone, not the number nudged.
+    # At most nine: eight with missions on and the Console off, nine with the Console on, seven with missions off (4.1:
+    # Memory is only cards now). A tenth needs the measurement redone, not the number nudged.
     # `class="tab active"` is one of them, so match the class rather than the literal string.
     # The tabs come from the shared _topbar.html partial, so count them in the rendered page.
+    monkeypatch.setattr(config, "MISSIONS_ENABLED", True, raising=False)
     html = _render_with_certs(tmp_path, monkeypatch, [])
     assert len(re.findall(r'class="tab(?: active)?"', html)) == 8
 

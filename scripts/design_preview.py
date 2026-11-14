@@ -417,6 +417,8 @@ class OfflineRpc:
         "config.enforced": {"paused_containers": ["CASA_ADGUARD"], "backup_jobs": ["weekly"], "links": []},
         "proposal.list_pending": [],
         "incident.list": [],
+        "record.list": {"rows": [], "total": 0, "limit": 50, "offset": 0,
+                        "counts": {"outcome": {}, "nature": {}, "origin": {}}},
         "auth.status": {"locked": False, "remaining_attempts": 3, "locked_until": None,
                         "accepted": True, "epoch": 0, "sent": True},
     }

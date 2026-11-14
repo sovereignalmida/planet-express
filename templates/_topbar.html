@@ -8,15 +8,15 @@
     <nav class="tabs">
       {# Overview, Network, Backups, Config and Crew are panels of the dashboard: there they switch in place
          (dashboard.js, data-tab), anywhere else they are links back to the dashboard at that tab. Console,
-         Hosts, Missions and Memory are pages of their own. Missions and Memory are always shown: NEEDS YOU and
-         DEPLOYMENTS live there and work with missions off (rc14.7.3). #}
+         Hosts, Missions and Memory are pages of their own. Missions is always shown: the record, NEEDS YOU and UPDATES
+         work with missions off. Memory only exists with missions on (4.1: its DEPLOYMENTS moved to Missions › UPDATES). #}
       {% for name, label in [("overview", "Overview"), ("console", "Console"), ("network", "Network"), ("hosts", "Hosts"), ("backups", "Backups"), ("missions", "Missions"), ("memory", "Memory"), ("config", "Config"), ("crew", "Crew")] %}
       {% if name == "console" %}{% if console_enabled() %}
       <a class="tab{{ ' active' if page == 'console' }}" href="{{ url_for('console_page') }}">Console</a>
       {% endif %}
       {% elif name == "hosts" %}<a class="tab{{ ' active' if page == 'hosts' }}" href="{{ url_for('hosts') }}">Hosts</a>
-      {% elif name == "missions" %}<a class="tab{{ ' active' if page == 'missions' }}" href="{{ '/missions' if missions_enabled() else '/missions/needs-you' }}">Missions</a>
-      {% elif name == "memory" %}<a class="tab{{ ' active' if page == 'memory' }}" href="{{ '/memory' if missions_enabled() else '/memory/deployments' }}">Memory</a>
+      {% elif name == "missions" %}<a class="tab{{ ' active' if page == 'missions' }}" href="/missions">Missions</a>
+      {% elif name == "memory" %}{% if missions_enabled() %}<a class="tab{{ ' active' if page == 'memory' }}" href="/memory">Memory</a>{% endif %}
       {% elif page == "dashboard" %}<button class="tab{{ ' active' if loop.first }}" data-tab="{{ name }}" type="button">{{ label }}</button>
       {% else %}<a class="tab" href="{{ url_for('index') }}#{{ name }}">{{ label }}</a>
       {% endif %}{% endfor %}

@@ -22,6 +22,13 @@ def mission(mid, title, status="investigating", tier="propose", **kw):
             "closed_at": None, "cancel_requested": False, "outcome": None, **kw}
 
 
+def rec(kind, rid, title, *, outcome="completed", nature="change", origin="console", at=1_800_000_000, runs=None,
+        detail="", href=None, mission_id="M-2", calls=0, cost_usd=None):
+    return {"kind": kind, "id": rid, "title": title, "at": at, "started_at": at, "nature": nature, "origin": origin,
+            "outcome": outcome, "detail": detail, "runs": runs or [], "href": href or f"/console/{rid}",
+            "mission_id": mission_id, "calls": calls, "cost_usd": cost_usd}
+
+
 def detail(m, **kw):
     return {**m, "goal": "Find <b>why</b>", "success_criteria": "a diagnosis", "grant": {"tier": "propose"},
             "grant_hash": "0" * 64, "plan": None, "plan_hash": None, "verification_plan": None,
@@ -59,7 +66,12 @@ class Core:
             "memory.deprecate": card("conf-one", "deprecated"),
             "canary.candidates": [], "proposal.list_pending": [],
             "mission.provider_usage": {"source": "none", "available": False, "state": "off"},
+            "record.list": self.record_page,
         }
+        self.record = [rec("conversation", "c1", "Why is <script>x</script> slow", outcome="open", nature="question",
+                           runs=[]),
+                       rec("execution", "a1", "Canary update media/plex", outcome="completed", origin="automatic",
+                           detail="plex:latest: 1a → 2b, ok", href="/executions/e1", mission_id=None)]
         self.errors = {}
         self.pool = [mission("M-2", "Why is <script>x</script> slow"),
                      mission("M-1", "Old one", status="completed")]
@@ -70,6 +82,12 @@ class Core:
         rows = [m for m in self.pool if (m["status"] in closed) == (params.get("scope") == "closed")]
         return {"missions": rows[:params["limit"]], "total": len(rows), "limit": params["limit"], "offset": 0,
                 "truncated": False}
+
+    def record_page(self, params):
+        """record.list as core answers it: the real filter and paging over `self.record`."""
+        from planet_express.application.record import select
+        return select(self.record, limit=params["limit"], offset=params["offset"], outcome=params.get("outcome"),
+                      nature=params.get("nature"), origin=params.get("origin"))
 
     def __call__(self, method, params):
         self.calls.append((method, params))
@@ -137,14 +155,15 @@ def test_investigate_api_needs_csrf_and_auth(web):
 
 # ── Sub-tabs: NEEDS YOU and DEPLOYMENTS (rc14.7.3) ─────────────────────────────
 
-def test_the_board_has_sub_tabs_and_counts_what_needs_a_decision(web):
+def test_the_record_has_sub_tabs_and_counts_what_needs_a_decision(web):
     client, core, _ = web
     core.results["proposal.list_pending"] = [{"id": "p1"}, {"id": "p2"}]
     core.results["canary.candidates"] = [{"held": True, "stack": "media"}, {"held": False, "stack": "media"}]
     page = client.get("/missions").get_data(as_text=True)
-    assert 'href="/missions/needs-you"' in page and "NEEDS YOU" in page
+    assert 'href="/missions/needs-you"' in page and "NEEDS YOU" in page and 'href="/missions/updates"' in page
     assert '<span class="mc-subtab-count">3</span>' in page            # two plans and one held window
-    assert 'class="mc-subtab is-active" href="/missions" aria-current="page">MISSIONS' in page
+    assert 'class="mc-subtab is-active" href="/missions" aria-current="page">RECORD' in page
+
 
 
 def test_the_count_goes_quiet_when_core_cannot_answer(web):
@@ -169,28 +188,35 @@ def test_needs_you_holds_the_old_actions_panels(web):
     assert [m for m in core.methods() if m.startswith("mission.")] == ["mission.list"]
 
 
-def test_needs_you_and_deployments_work_with_missions_off(web, monkeypatch, tmp_path):
+def test_the_record_needs_you_and_updates_work_with_missions_off(web, monkeypatch, tmp_path):
     client, core, _ = web
     monkeypatch.setattr(config, "MISSIONS_ENABLED", False, raising=False)
     page = client.get("/missions/needs-you").get_data(as_text=True)
     assert 'id="approval-panel"' in page and "Missions are disabled" not in page
-    assert 'href="/missions/needs-you">Missions</a>' in page              # the tab lands where there is something
-    assert 'href="/memory/deployments">Memory</a>' in page
-    assert 'id="manifest-panel"' in client.get("/memory/deployments").get_data(as_text=True)
+    assert 'href="/missions">Missions</a>' in page
+    assert ">Memory</a>" not in page                                     # Memory holds only cards: none with missions off
+    record = client.get("/missions").get_data(as_text=True)
+    assert "Canary update media/plex" in record and "Missions are disabled" not in record
+    assert "mission.provider_usage" not in core.methods()
+    assert 'id="manifest-panel"' in client.get("/missions/updates").get_data(as_text=True)
 
 
-def test_deployments_is_a_memory_sub_tab(web, monkeypatch, tmp_path):
+
+def test_updates_moved_from_memory_to_missions(web, monkeypatch, tmp_path):
     client, core, _ = web
     history = tmp_path / "update_history.json"
     history.write_text('{"entries": [{"ts": "2026-09-06T06:29:23+00:00", "stack": "tgbot", "service": "renderd", '
                        '"status": "updated"}]}')
     monkeypatch.setattr(config, "UPDATE_HISTORY_FILE", history)
-    page = client.get("/memory/deployments").get_data(as_text=True)
+    page = client.get("/missions/updates").get_data(as_text=True)
     assert 'id="update-history-data"' in page and "renderd" in page and 'id="deploy-manifest"' in page
-    assert 'class="mc-subtab is-active" href="/memory/deployments" aria-current="page">DEPLOYMENTS' in page
-    assert 'class="tab active" href="/memory"' in page
+    assert 'class="mc-subtab is-active" href="/missions/updates" aria-current="page">UPDATES' in page
+    assert 'class="tab active" href="/missions"' in page
+    old = client.get("/memory/deployments")
+    assert old.status_code == 301 and old.headers["Location"].endswith("/missions/updates")
     cards = client.get("/memory").get_data(as_text=True)
-    assert 'class="mc-subtab is-active" href="/memory" aria-current="page">CARDS' in cards
+    assert "DEPLOYMENTS" not in cards and "mc-subtabs" not in cards
+
 
 
 def test_needs_you_reads_the_windows_once_and_every_missions_page_shows_the_count(web):
@@ -315,17 +341,22 @@ def test_the_tabs_run_in_the_operators_order(web):
 
 
 # ── Missions ──────────────────────────────────────────────────────────────────
-def test_board_renders_groups_and_escapes(web):
+def test_the_record_renders_rows_and_escapes(web):
     client, core, _ = web
+    core.record[0]["runs"] = [{"id": "M-9", "title": "Restart <b>plex</b>", "outcome": "rolled_back", "status": "rolled_back",
+                               "at": 1, "href": "/missions/M-9"}]
+    core.record[0].update(calls=3, cost_usd=0.4182, unpriced=1)
     r = client.get("/missions")
     page = r.get_data(as_text=True)
-    assert r.status_code == 200 and core.methods() == ["mission.list", "mission.list", "mission.provider_usage",
-                                                       "proposal.list_pending", "canary.candidates"]
-    assert [p["scope"] for m, p in core.calls if m == "mission.list"] == ["active", "closed"]
+    assert r.status_code == 200 and core.methods() == ["record.list", "mission.provider_usage", "proposal.list_pending",
+                                                       "canary.candidates", "mission.list"]
+    assert [p for m, p in core.calls if m == "record.list"] == [{"limit": 50, "offset": 0}]
     assert "Why is &lt;script&gt;x&lt;/script&gt; slow" in page and "<script>x</script>" not in page
-    assert "INVESTIGATING" in page.upper() and "COMPLETED" in page.upper()
-    assert 'href="/missions/M-2"' in page
+    assert "Restart &lt;b&gt;plex&lt;/b&gt;" in page and 'href="/missions/M-9"' in page and "rolled back" in page
+    assert 'href="/console/c1"' in page and "3 model calls · $0.42 for 2 priced, 1 without a price" in page
+    assert 'href="/executions/e1"' in page and "plex:latest: 1a → 2b, ok" in page
     assert 'name="viewport"' in page and "missions.css" in page
+
 
 
 def test_board_shows_provider_credit_and_spend(web):
@@ -351,10 +382,31 @@ def test_board_without_provider_usage_still_renders(web):
     assert "admin_key_env" in page and "credit left" not in page
 
 
-def test_board_empty_state(web):
+def test_the_record_empty_state(web):
     client, core, _ = web
-    core.pool = []
-    assert "No missions yet" in client.get("/missions").get_data(as_text=True)
+    core.record = []
+    assert "Nothing yet" in client.get("/missions").get_data(as_text=True)
+
+
+def test_the_record_filters_and_pages(web):
+    client, core, _ = web
+    core.record = [rec("conversation", f"c{i}", f"Question {i}", nature="question", at=2_000_000 - i) for i in range(60)] + [
+        rec("execution", "a1", "Safe prune", origin="automatic", outcome="failed", href="/executions/e1")]
+    page = client.get("/missions").get_data(as_text=True)
+    assert "1–50 of 61" in page and 'href="/missions?page=2"' in page and "Question 49" in page and "Question 50" not in page
+    page = client.get("/missions?page=2").get_data(as_text=True)
+    assert "Question 50" in page and "51–61 of 61" in page
+    page = client.get("/missions?nature=change").get_data(as_text=True)
+    assert "Safe prune" in page and "Question 0" not in page and "clear filters" in page
+    assert 'class="mc-chip is-on" href="/missions" aria-current="true">changes <span>1</span>' in page
+    assert 'href="/missions?nature=change&amp;outcome=failed"' in page or 'href="/missions?outcome=failed&amp;nature=change"' in page
+    assert [p for m, p in core.calls if m == "record.list"][-1] == {"limit": 50, "offset": 0, "nature": "change"}
+    client.get("/missions?nature=bogus&page=-1&origin=<x>")
+    assert [p for m, p in core.calls if m == "record.list"][-1] == {"limit": 50, "offset": 0}   # unknown values are dropped
+    page = client.get("/missions?page=999999").get_data(as_text=True)                         # clamped to what Core accepts
+    assert [p for m, p in core.calls if m == "record.list"][-1]["offset"] == 99_950
+    assert "No rows on this page" in page and "could not be read" not in page
+
 
 
 def test_detail_shows_events_artifacts_result_and_cancel(web):
@@ -428,20 +480,21 @@ def test_cancel_bad_id_never_reaches_core(web):
 
 def test_missions_disabled_state(web):
     client, core, _ = web
-    core.errors["mission.list"] = "disabled"
     core.errors["mission.get"] = "disabled"
-    for path in ("/missions", "/missions/M-2"):
-        r = client.get(path)
-        assert r.status_code == 200 and "Missions are disabled" in r.get_data(as_text=True)
+    r = client.get("/missions/M-2")
+    assert r.status_code == 200 and "Missions are disabled" in r.get_data(as_text=True)
     core.errors["mission.cancel"] = "disabled"
     r = client.post("/missions/M-2/cancel", data={"csrf_token": token(client)})
     assert r.status_code == 302
 
 
-def test_core_down_is_a_503_not_a_crash(web):
+
+def test_core_down_leaves_the_record_page_standing(web):
     client, core, _ = web
-    core.errors["mission.list"] = "internal"
-    assert client.get("/missions").status_code == 503
+    core.errors["record.list"] = "internal"
+    r = client.get("/missions")
+    assert r.status_code == 200 and "could not be read from core" in r.get_data(as_text=True)
+
 
 
 def test_nav_links_follow_the_flag(web, monkeypatch):
@@ -539,30 +592,6 @@ def test_incidents_js_offers_investigate():
 
 
 # ── round 2 ───────────────────────────────────────────────────────────────────
-def test_board_shows_old_open_missions_beside_many_closed_ones(web):
-    client, core, _ = web
-    core.pool = [mission("M-900", "Ancient but actionable", status="awaiting_decision")] + [
-        mission(f"M-{i}", f"done {i}", status="completed") for i in range(1, 300)]
-    page = client.get("/missions").get_data(as_text=True)
-    assert "Ancient but actionable" in page
-    active = [p for m, p in core.calls if m == "mission.list" and p["scope"] == "active"][0]
-    closed = [p for m, p in core.calls if m == "mission.list" and p["scope"] == "closed"][0]
-    assert active["limit"] == 500 and closed["limit"] <= 100
-    assert "most recently closed" in page            # the truncation note is about the closed part only
-
-
-def test_no_truncation_note_when_everything_fits(web):
-    client, _, _ = web
-    assert "most recently closed" not in client.get("/missions").get_data(as_text=True)
-
-
-def test_a_status_the_page_has_never_heard_of_still_gets_a_column(web):
-    client, core, _ = web
-    core.pool = [mission("M-5", "Brand new state", status="brand_new_status")]
-    page = client.get("/missions").get_data(as_text=True)
-    assert "Brand new state" in page and "BRAND NEW STATUS" in page
-
-
 def test_board_columns_follow_the_model_statuses():
     from typing import get_args
     from planet_express.application import mission_service
@@ -602,13 +631,6 @@ def test_reverify_post_uses_session_operator_and_csrf(web):
     r = client.post("/memory/due-one/reverify", data={"csrf_token": token(client)})
     assert r.headers["Location"].endswith("notice=conflict")
     assert client.post("/memory/Bad Id/reverify", data={"csrf_token": token(client)}).status_code in (400, 404)
-
-
-def test_disabled_notice_says_core_needs_a_restart(web):
-    client, core, _ = web
-    core.errors["mission.list"] = "disabled"
-    page = client.get("/missions").get_data(as_text=True)
-    assert "restart" in page.lower() and "core" in page.lower()
 
 
 def test_investigate_internal_failure_is_not_a_retry_prompt(web):

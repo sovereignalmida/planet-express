@@ -1,7 +1,7 @@
 # Missions and Memory after the Console: one home per concept (design, 2026-11-13)
 
-Status: proposal for the operator's review. Release 1 (NEEDS YOU counts only what needs you) ships as 4.0.1 alongside this
-doc; nothing else here is built. No database schema change anywhere: every change is a view over the tables that exist.
+Status: release 1 (NEEDS YOU counts only what needs you) shipped as 4.0.1; release 2 (the record) as 4.1.0. Releases 3 and 4
+are not built. No database schema change anywhere: every change is a view over the tables that exist.
 
 ## 1. The problem
 
@@ -99,7 +99,7 @@ memory cards are absent, as today.
 | Release | Content | Size |
 |---|---|---|
 | 1 (4.0.1, built) | NEEDS YOU counts only what needs you; Core's mission list names the owning conversation | S |
-| 2 | **The record**: time-ordered list replacing the board; conversations with nested runs; v3 executions, canary updates and safe prunes as rows; deployments move in; filters; cost per row | M |
+| 2 (4.1.0, built) | **The record**: time-ordered list replacing the board; conversations with nested runs; v3 executions, canary updates and safe prunes as rows; deployments move in; filters; cost per row | M |
 | 3 | **One place to act**: `needs.list` in Core read by every count; the mission page drops buttons for conversation-owned missions; Telegram duplicates answer "decide it in the conversation"; candidate wording and "offered in" links | M |
 | 4 | **Retire**: standing grants UI, the pre-Console creation path, dead RPCs; INSTALL and README updated | S |
 

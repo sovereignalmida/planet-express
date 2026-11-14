@@ -37,10 +37,12 @@ from config_io import validate_config_text
 from planet_express.application.mission_service import (
     INCIDENT_ID_RE,
     MISSION_ID_RE,
-    STATUS_ORDER,
     TERMINAL_STATUSES,
 )
 from planet_express.application.multi_host import Fleet
+from planet_express.application.record import NATURES as RECORD_NATURES
+from planet_express.application.record import ORIGINS as RECORD_ORIGINS
+from planet_express.application.record import OUTCOMES as RECORD_OUTCOMES
 from planet_express.execution.actions import LOG_CURSOR_HASH_LIMIT, LOG_TIMESTAMP_RE
 from planet_express.integrations.rpc import RpcError, call
 from planet_express.memory.models import SLUG_RE
@@ -896,7 +898,16 @@ _MISSION_NOTICES = {
     "standing_created": "Standing grant created.",
     "standing_revoked": "Standing grant revoked.",
 }
-CLOSED_ON_BOARD = 50
+RECORD_PAGE = 50
+RECORD_MAX_PAGE = 100_000 // RECORD_PAGE          # Core refuses an offset past 100,000
+
+
+def _record_when(at) -> str:
+    """A record row's time, local: "13 Nov 14:02"."""
+    try:
+        return time.strftime("%d %b %H:%M", time.localtime(float(at)))
+    except (TypeError, ValueError, OverflowError, OSError):
+        return "—"
 _MEMORY_NOTICES = {
     "confirmed": "Card confirmed.",
     "reverified": "Card re-verified.",
@@ -1153,25 +1164,40 @@ def register_mission_pages(app, core) -> None:
 
     @app.get("/missions")
     def missions_page():
+        """The record (4.1, docs/designs/missions-memory.md): everything PE changed or looked into, newest first. Replaces the
+        status board. Works with missions off (approved plans, canary updates and safe prunes need no mission tables)."""
+        filters = {}
+        for name, allowed in (("outcome", RECORD_OUTCOMES), ("nature", RECORD_NATURES), ("origin", RECORD_ORIGINS)):
+            value = request.args.get(name) or None
+            filters[name] = value if value in allowed else None
+        page_raw = request.args.get("page", "1")
+        page_no = min(int(page_raw), RECORD_MAX_PAGE) if re.fullmatch(r"[1-9][0-9]{0,5}", page_raw) else 1
+        params = {"limit": RECORD_PAGE, "offset": (page_no - 1) * RECORD_PAGE, **{k: v for k, v in filters.items() if v}}
         try:
-            # Every open mission (so an old one awaiting a decision never drops off the board), plus only the
-            # most recent closed ones.
-            active = core("mission.list", {"scope": "active", "limit": 500})
-            closed = core("mission.list", {"scope": "closed", "limit": CLOSED_ON_BOARD})
-        except RpcError as error:
-            if error.code != "disabled":
-                raise
-            return shell("missions.html", page="missions", disabled=True, notice=None, data=None)
-        try:
-            usage = core("mission.provider_usage", {})          # credit and spend as the provider reports them (rc14.7)
-        except RpcError:
-            usage = None                                         # an older Core, or a read that failed: the board still shows
-        rows = active["missions"] + closed["missions"]
-        seen = {m["status"] for m in rows}
-        order = list(STATUS_ORDER) + sorted(seen - set(STATUS_ORDER))   # a status added later still gets a column
-        return shell("missions.html", page="missions", disabled=False, missions=rows, order=order,
-                     active=active, closed=closed, usage=usage, notice=notice_for(_MISSION_NOTICES),
-                     needs_count=needs_count(waiting=waiting_missions(active)))
+            record = core("record.list", params)
+        except Exception:  # noqa: BLE001 -- an older or unreachable Core: the page says so, it never fails
+            current_app.logger.warning("Could not read the record from core")
+            record = None
+        if not (isinstance(record, dict) and isinstance(record.get("rows"), list) and isinstance(record.get("counts"), dict)):
+            record = None                                        # an answer this page cannot read is shown as unreadable
+        if record is not None:
+            for r in record["rows"]:
+                r["when"] = _record_when(r.get("at"))
+        usage = None
+        if config.MISSIONS_ENABLED:
+            try:
+                usage = core("mission.provider_usage", {})      # credit and spend as the provider reports them (rc14.7)
+            except Exception:  # noqa: BLE001 -- an older Core, or a read that failed: the record still shows
+                usage = None
+
+        def rec_url(page=None, **change):
+            args = {**filters, **change}
+            if page and page > 1:
+                args["page"] = page
+            return url_for("missions_page", **{k: v for k, v in args.items() if v})
+
+        return shell("missions.html", page="missions", disabled=False, record=record, filters=filters, usage=usage,
+                     page_no=page_no, rec_url=rec_url, notice=notice_for(_MISSION_NOTICES), needs_count=needs_count())
 
     @app.get("/missions/needs-you")
     def needs_you_page():
@@ -1355,11 +1381,16 @@ def register_mission_pages(app, core) -> None:
         return shell("memory.html", page="memory", disabled=False, unavailable=False, candidates=candidates,
                      confirmed=confirmed, due=due, notice=notice_for(_MEMORY_NOTICES))
 
-    @app.get("/memory/deployments")
+    @app.get("/missions/updates")
     def deployments_page():
-        """The old dashboard History tab (rc14.7.3): Zoidberg's canary runs. Works with missions off."""
-        return shell("memory_deployments.html", page="memory", sub="deployments", disabled=False, notice=None,
-                     live={"update_history": dashboard_data.summarize_update_history()})
+        """Zoidberg's canary runs, grouped by run (the old History tab, rc14.7.3; under Memory until 4.1: changes to the host
+        belong with the record, not with what PE knows). Works with missions off."""
+        return shell("memory_deployments.html", page="missions", sub="updates", disabled=False, notice=None,
+                     live={"update_history": dashboard_data.summarize_update_history()}, needs_count=needs_count())
+
+    @app.get("/memory/deployments")
+    def old_deployments_page():
+        return redirect(url_for("deployments_page"), 301)
 
     def card_change(card_id, method, extra, done):
         if SLUG_RE.fullmatch(card_id) is None:

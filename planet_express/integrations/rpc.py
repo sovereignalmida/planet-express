@@ -947,7 +947,39 @@ def build_core_handlers(
         public = result.as_dict()
         return _PostReply(public, callback) if callback is not None else public
 
-    handlers = {"logs.tail": logs, "approval.get": approval_get,
+    from planet_express.application.record import RecordCache
+    record_cache = RecordCache()
+
+    def record_list(params):
+        """The record (4.1): everything changed or looked into, newest first, filtered and paged. Works with missions off
+        (approvals, executions, Zoidberg's history); with them on, conversations and missions join it."""
+        from planet_express.application import record as record_mod
+        from state_models import UpdateHistory
+        if not isinstance(params, dict) or not {"limit", "offset"} <= set(params) <= {"limit", "offset", "outcome", "nature", "origin"}:
+            raise RpcError("Invalid params", "bad_request")
+        limit, offset = params["limit"], params["offset"]
+        if type(limit) is not int or not 1 <= limit <= 100 or type(offset) is not int or not 0 <= offset <= 100_000:
+            raise RpcError("Invalid limit or offset", "bad_request")
+        filters = {}
+        for name, allowed in (("outcome", record_mod.OUTCOMES), ("nature", record_mod.NATURES), ("origin", record_mod.ORIGINS)):
+            value = params.get(name)
+            if value is not None and value not in allowed:
+                raise RpcError(f"Invalid {name}", "bad_request")
+            filters[name] = value
+        on = bool(missions is not None and missions.enabled())
+
+        def build():
+            history: list[dict] = []
+            try:
+                history = [e.model_dump() for e in UpdateHistory.model_validate_json(config.UPDATE_HISTORY_FILE.read_text()).entries]
+            except (OSError, ValueError):
+                pass                                             # no history yet, or unreadable: the approvals still show
+            with store._connect() as conn:
+                return record_mod.build_record(conn, missions=on, history=history)
+        rows = record_cache.rows(on, build)
+        return record_mod.select(rows, limit=limit, offset=offset, **filters)
+
+    handlers = {"logs.tail": logs, "approval.get": approval_get, "record.list": record_list,
             "approval.list_recent": approval_recent, "action.request": request_action, "query.container": container,
             "scan.start": scan_start,
             "pipeline.status": pipeline_status_get,
