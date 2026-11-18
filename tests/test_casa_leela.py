@@ -941,6 +941,127 @@ def test_the_last_container_in_the_restart_inspect_keeps_its_restart_count(monke
     assert by_name["CASA_OK"]["restart_count"] == 0
 
 
+# ── crash-looping is restarting NOW, not Docker's lifetime RestartCount (2026-11-18) ──────────────
+
+def _scan_one(tmp_path, monkeypatch, *, restarts, uptime_s=None, state="running", cid="abc123", previous=None,
+              status=None, health="healthy"):
+    """check_containers for one container. `previous`: the last snapshot's containers (None: no snapshot at all;
+    a str: written as-is, to test a malformed one)."""
+    from datetime import datetime, timedelta, timezone
+    snapshot = tmp_path / "monitor.json"
+    if isinstance(previous, str):
+        snapshot.write_text(previous)
+    elif previous is not None:
+        snapshot.write_text(json.dumps({"containers": previous}))
+    monkeypatch.setattr(casa_leela.config, "STATE_MONITOR", snapshot)
+    started = (datetime.now(timezone.utc) - timedelta(seconds=uptime_s or 0)).isoformat().replace("+00:00", "Z")
+    if status is None:
+        status = f"Up 5 minutes ({health})" if state == "running" else "Restarting (1) 3 seconds ago"
+    ps = json.dumps({"name": "CASA_APP", "id": cid, "status": status, "image": "img"})
+    inspect = f"/CASA_APP\t{restarts}\t{state}\t{started}\t0\t\t\t\t\t0"
+
+    def fake_run(cmd, timeout=None):
+        if isinstance(cmd, list) and cmd[:2] == ["docker", "inspect"]:
+            return 0, inspect + "\n", ""
+        return 0, ps + "\n", ""
+    monkeypatch.setattr(casa_leela, "_run", fake_run)
+    (c,) = casa_leela.check_containers()
+    return c
+
+
+def test_a_high_lifetime_count_with_no_new_restarts_is_not_crash_looping(tmp_path, monkeypatch):
+    c = _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=1800,
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 60}])
+    assert not c.get("crash_looping") and "issue" not in c
+    assert c["restart_count"] == 60 and c["restarts_since_last_scan"] == 0     # kept, as information
+
+
+def test_three_restarts_since_the_last_scan_is_crash_looping(tmp_path, monkeypatch):
+    c = _scan_one(tmp_path, monkeypatch, restarts=63, uptime_s=300,
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 60}])
+    assert c["crash_looping"] is True and c["restarts_since_last_scan"] == 3
+    assert c["issue"].startswith("crash-looping (restarted 3x since the last scan, 63 lifetime)")
+
+
+def test_two_restarts_since_the_last_scan_with_a_long_uptime_is_not(tmp_path, monkeypatch):
+    c = _scan_one(tmp_path, monkeypatch, restarts=62, uptime_s=3600,
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 60}])
+    assert not c.get("crash_looping")
+
+
+def test_a_loop_slower_than_the_scans_is_still_caught_while_it_is_young(tmp_path, monkeypatch):
+    """Restarting every 4 minutes with scans 10 minutes apart: 2 per scan, up 60-240s (code review)."""
+    c = _scan_one(tmp_path, monkeypatch, restarts=62, uptime_s=200,
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 60}])
+    assert c["crash_looping"] is True
+    # young but with no restart since the last scan: it was started by hand or recreated in place, not looping
+    c = _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=200,
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 60}])
+    assert not c.get("crash_looping")
+
+
+def test_a_container_docker_says_is_restarting_is_crash_looping(tmp_path, monkeypatch):
+    c = _scan_one(tmp_path, monkeypatch, restarts=1, state="restarting",
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 1}])
+    assert c["crash_looping"] is True and c["issue"].startswith("crash-looping (restarting now")
+
+
+def test_one_restart_and_a_very_short_uptime_is_crash_looping_as_before(tmp_path, monkeypatch):
+    c = _scan_one(tmp_path, monkeypatch, restarts=1, uptime_s=30,
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 1}])
+    assert c["crash_looping"] is True
+
+
+@pytest.mark.parametrize("previous", [
+    [{"name": "CASA_APP", "id": "OTHER", "restart_count": 0}],        # recreated: a new container ID
+    [{"name": "CASA_APP", "id": "abc123", "restart_count": 90}],      # recreated: the count went down
+])
+def test_a_recreated_container_is_rebaselined_not_flagged(tmp_path, monkeypatch, previous):
+    c = _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=7200, previous=previous)
+    assert c["restarts_since_last_scan"] is None and not c.get("crash_looping")
+
+
+@pytest.mark.parametrize("uptime_s, looping", [(7200, False), (120, True)])
+def test_with_no_previous_snapshot_a_high_count_counts_only_while_young(tmp_path, monkeypatch, uptime_s, looping):
+    c = _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=uptime_s, previous=None)
+    assert c["restarts_since_last_scan"] is None and bool(c.get("crash_looping")) is looping
+
+
+@pytest.mark.parametrize("previous", ["{not json", '["a list"]', json.dumps({"containers": "nope"}),
+                                      json.dumps({"containers": [{"name": "CASA_APP", "id": None, "restart_count": "60"}]}),
+                                      json.dumps({"containers": [{"name": "CASA_APP", "id": "abc123", "restart_count": True}]})])
+def test_a_missing_or_malformed_previous_snapshot_falls_back_to_the_no_baseline_rule(tmp_path, monkeypatch, previous):
+    assert not _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=7200, previous=previous).get("crash_looping")
+    assert _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=120, previous=previous)["crash_looping"] is True
+
+
+def test_a_failed_inspect_is_never_a_baseline(tmp_path, monkeypatch):
+    """Codex: a failed inspect used to save count 0 with a valid ID, so the next good scan saw every historical restart
+    as "since the last scan"."""
+    snapshot = tmp_path / "monitor.json"
+    monkeypatch.setattr(casa_leela.config, "STATE_MONITOR", snapshot)
+    ps = json.dumps({"name": "CASA_APP", "id": "abc123", "status": "Up 2 days (healthy)", "image": "img"})
+    monkeypatch.setattr(casa_leela, "_run", lambda cmd, timeout=None: (1, "", "inspect timeout")
+                        if isinstance(cmd, list) else (0, ps + "\n", ""))
+    first = casa_leela.check_containers()
+    assert first[0]["restart_count_read"] is False and first[0]["restarts_since_last_scan"] is None
+    c = _scan_one(tmp_path, monkeypatch, restarts=60, uptime_s=2 * 86400, previous=first)
+    assert c["restarts_since_last_scan"] is None and not c.get("crash_looping")
+
+
+def test_the_scan_records_the_container_id_for_the_next_baseline(tmp_path, monkeypatch):
+    assert _scan_one(tmp_path, monkeypatch, restarts=0, uptime_s=7200)["id"] == "abc123"
+
+
+def test_a_healthy_container_with_a_high_lifetime_count_is_online_and_never_blocks_a_prune(tmp_path, monkeypatch):
+    import casa_farnsworth
+    import dashboard_data
+    c = _scan_one(tmp_path, monkeypatch, restarts=92, uptime_s=1800, status="Up 30 minutes (healthy)",
+                  previous=[{"name": "CASA_APP", "id": "abc123", "restart_count": 92}])
+    assert dashboard_data._container_state(c, None) == "online"
+    assert not casa_farnsworth._container_blocks_prune(c)
+
+
 def test_a_journalctl_offset_without_a_colon_is_read(monkeypatch):
     # `journalctl -o short-iso` writes +0100; Python before 3.11 only parses +01:00
     _mock_host_logs(monkeypatch, _journal_line("Finished casa-borg.service - borg.", "2026-10-04T02:41:10+0100"))

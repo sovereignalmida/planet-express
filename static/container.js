@@ -294,7 +294,7 @@
         get("log-led").className = "led-dot status-" + level;
         logLevel(level);
         const values = { health: facts.health, policy: facts.restart_policy.name + " (max retries: " + facts.restart_policy.max_retries + ")",
-          restarts: facts.restart_count, ports: facts.ports.map(p => p.host_ip + ":" + p.host_port + " → " + p.container_port + "/" + p.protocol).join(", ") || "None",
+          restarts: facts.restart_count + " (lifetime)", ports: facts.ports.map(p => p.host_ip + ":" + p.host_port + " → " + p.container_port + "/" + p.protocol).join(", ") || "None",
           image: facts.image_id };
         Object.entries(values).forEach(([key, value]) => { get("fact-" + key).textContent = value; });
         get("header-image").textContent = facts.image_id;

@@ -292,10 +292,17 @@ session holds a uid in the old one.
    (`/usr/libexec/planetexpress/pe-launch`, the only code that starts a session), `launcher-sudoers`
    (`/etc/sudoers.d/planetexpress-launch`, systemd hosts only; MOS has no sudo), `session-access` (systemd hosts only,
    below), `cgroup-tree` (a `Delegate=yes` drop-in
-   for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root` and `socket-root`. They can be run by
+   for `casa-planetexpress.service`, or on MOS `launcher-boot.sh`), `workspace-root`, `socket-root` and
+   `socket-root-boot` (systemd hosts only: `/etc/tmpfiles.d/planetexpress-sessions.conf`, which makes `sock_root` again at
+   every boot, because `/run` is emptied on reboot and Core runs unprivileged; on MOS `launcher-boot.sh` makes it). They can be run by
    hand: `python3 -m planet_express.missions.launcher.setup_steps probe|repair|undo --core-user USER --workspace-root DIR`.
    An install from before trust mode may also have `sudoers-readable` (a read-only ACL for Core on the sudoers files, for the
    Repair gate that trust mode removed). New plans no longer make it; `undo` and uninstall still take it away.
+
+   **Upgrading from 4.2.0 or earlier:** those releases made `sock_root` once and nothing made it again, so after a reboot
+   the preflight failed with `Core can make and bind a per-session socket: /run/planetexpress-sessions: No such file or
+   directory` and the host was proposal-only. Run the launcher setup again as root (the wizard, or `setup_steps repair`):
+   it adds `socket-root-boot` and remakes the directory. Then restart `casa-planetexpress`.
 
    **Session access (trust mode).** Every session has real access, as you have at a terminal: the real Docker socket, the
    host's logs and passwordless sudo. sudo refuses a uid with no account, so `session-access` creates a system group
@@ -419,6 +426,7 @@ provider named by `LLM_PROVIDER` (`openai` or `anthropic`) directly, as before; 
 | Root helper | `pe-launch` and its trust file `launch.conf` | `/usr/libexec/planetexpress/pe-launch`, `/etc/planetexpress-launch/launch.conf` (MOS: under `PE_HOME`) | uninstall / undo (only if it is exactly what setup wrote) |
 | Sudoers | `planetexpress-launch` (Core may run the helper), `planetexpress-sessions` (`%pe-session ALL=(ALL:ALL) NOPASSWD: ALL`) | `/etc/sudoers.d/` | uninstall / undo; the preflight fails closed on an unmanaged rule that reaches Core |
 | Cgroup | delegated `sessions` subtree | systemd drop-in, or MOS `launcher-boot.sh` | uninstall / undo |
+| Socket root at boot | `d <sock_root> 0711 <Core uid> <Core gid> -`, so `sock_root` exists again after every reboot | `/etc/tmpfiles.d/planetexpress-sessions.conf` (systemd), or MOS `launcher-boot.sh` | uninstall / undo (only if it is exactly what setup wrote) |
 | Sockets | one directory per session with `worker.sock` (the worker's RPC; it can never reach approval or decision methods); sessions use the host's own Docker socket through the `docker` group | `missions.sock_root/<session id>/` (`sock_root` is owned by Core, mode 0711; each session directory is 0750 for that session's private group) | removed when the session ends |
 | State | mission, memory, approval, lease and checkpoint tables (schema 6); checkpoint store; per-mission artifacts and workspaces | the state database, `missions.checkpoint.root`, `missions.workspace_root` | state snapshot restore; uninstall keeps data |
 | Secrets | none in a session. Brokered tool keys live only in Core's environment, named by `tool_secret_env` (a secret ref to an environment variable NAME, never a value) | Core's environment / `/etc/planetexpress.env` | you |
@@ -453,7 +461,7 @@ removed with a record; v3 ignores them but they are root-owned files you should 
 
 ### Uninstalling mission control
 
-The wizard's uninstall (and `setup_steps undo`) removes, in reverse order, the sockets directory, workspace root,
+The wizard's uninstall (and `setup_steps undo`) removes, in reverse order, the tmpfiles.d entry, the sockets directory, workspace root,
 cgroup drop-in or boot script, sudoers files, helper and `launch.conf`, taking a snapshot first and leaving your
 configuration, secrets, state and data. A step removes a file only if it is exactly what setup wrote; anything you edited
 is left and reported. Set `missions.enabled: false` (and restart) to turn the feature off without removing anything.

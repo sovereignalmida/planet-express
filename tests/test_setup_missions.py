@@ -26,7 +26,7 @@ from planet_express.setup.undo import undo as _undo
 REPO = str(Path(__file__).resolve().parent.parent)
 # `sudoers-readable` is retired (trust mode removed the Repair gate it served): new plans leave it out, uninstall still undoes it.
 NAMES = ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access", "cgroup-tree",
-         "workspace-root", "socket-root"]
+         "workspace-root", "socket-root", "socket-root-boot"]
 MOS_NAMES = ["session-uid-range", "launcher-helper", "helper-store", "cgroup-tree", "workspace-root", "socket-root"]
 ON = {"enabled": True}
 

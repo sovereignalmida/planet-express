@@ -497,7 +497,8 @@ def _launcher_params(b: _Builder, p: dict) -> dict:
 
 def _launcher_paths(params: dict):
     """The launcher module's own paths for these values; only used to render text. The Core uid and gid are read
-    from the host when a step runs, so nothing shown here depends on them."""
+    from the host when a step runs. The one preview that shows them is the MOS boot script (it chowns sock_root to
+    Core), and MOS Core must run as root (`_check_preconditions` blocks anything else), so 0:0 is what it will write."""
     from planet_express.missions.launcher.setup_steps import Paths
     extra = {k: params[k] for k in ("boot_script", "conf", "helper_store") if k in params}
     extra["log_groups"] = tuple(params.get("log_groups", ()))
@@ -612,6 +613,11 @@ def _launcher_steps(b: _Builder, p: dict, *, depends_on: tuple[str, ...]) -> Non
         "socket-root": ("Make the socket directory", params["sock_root"], "R2", b.text(
             f"Creates {params['sock_root']} owned by {params['core_user']}, mode 0711: each session's sockets live in a "
             "directory of its own inside it.")),
+        "socket-root-boot": ("Recreate the socket directory at every boot", paths.tmpfiles_conf, "R2", b.text(
+            f"Writes {paths.tmpfiles_conf} (root, 0644) with one line, `d {params['sock_root']} 0711 <Core uid> <Core gid> -` "
+            f"(the uid and gid of {params['core_user']}, read when this runs), and applies it with systemd-tmpfiles --create. "
+            f"{params['sock_root']} is under /run by default, which is emptied at every reboot, and Core cannot make it "
+            "itself; without this entry mission sessions stay proposal-only after a reboot until setup is run again.")),
     }
     last = depends_on
     for name, launcher_step in steps.items():

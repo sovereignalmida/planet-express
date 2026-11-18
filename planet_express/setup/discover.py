@@ -265,7 +265,7 @@ KNOWN_SYSTEM_PATHS = (
     # records what is at each of these so it replaces nothing it did not see.
     "/etc/planetexpress-launch/launch.conf", "/usr/libexec/planetexpress/pe-launch", "/etc/sudoers.d/planetexpress-launch",
     "/etc/sudoers.d/planetexpress-worker",
-    "/etc/systemd/system/casa-planetexpress.service.d/launcher.conf",
+    "/etc/systemd/system/casa-planetexpress.service.d/launcher.conf", "/etc/tmpfiles.d/planetexpress-sessions.conf",
 )
 # Beside a candidate install location. Every file `plan` may write has to be probed here or above: `plan`
 # only claims "absent" or "unchanged" about paths this report says it looked at.

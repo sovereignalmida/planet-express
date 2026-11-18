@@ -8,6 +8,7 @@ or cannot be run makes the host PROPOSAL-ONLY: the supervisor then refuses to st
 weaker fallback containment, decided 2026-10-13). The report is structured and printable.
 """
 
+import errno
 import json
 import os
 import select
@@ -347,7 +348,12 @@ def run_probe(report: PreflightReport, containment, *, workspace_root: str, sock
             try:
                 sock = _ProbeSocket(sock_root, sid)
             except OSError as exc:
-                report.add("Core can make and bind a per-session socket", False, f"{sock_root}: {exc.strerror}")
+                detail = f"{sock_root}: {exc.strerror}"
+                if exc.errno == errno.ENOENT and not os.path.lexists(sock_root):
+                    # Gone after a reboot (/run is a tmpfs) on a host set up before setup made it again at every boot.
+                    detail += (" (the launcher setup makes it, and remakes it at every boot; run the launcher setup "
+                               "again as root, see INSTALL.md \"Enabling it\")")
+                report.add("Core can make and bind a per-session socket", False, detail)
                 return
             report.add("Core can make and bind a per-session socket", True, sock_root)
             probe_sock = sock.directory
