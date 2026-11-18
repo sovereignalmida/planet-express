@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-11-18
+
+Two fixes from the 2026-11-18 incident: mission sessions are no longer disabled by a reboot, and a healthy container is no
+longer reported crash-looping because of old restarts.
+
 ### Fixed
 - **Mission sessions survive a reboot.** `missions.sock_root` (default `/run/planetexpress-sessions`, on a tmpfs) was made
   once by setup and nothing made it again, so after every reboot the launcher preflight failed and the host was
