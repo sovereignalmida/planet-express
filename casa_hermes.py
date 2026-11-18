@@ -47,6 +47,11 @@ SEVERITY RULES (apply all that match):
 - Container has crash_looping: true: ALWAYS HIGH regardless of image — a container repeatedly
   restarting is exactly as urgent whether it's Postgres or a plain app container. Do not
   downgrade these to MEDIUM.
+- restart_count is Docker's RestartCount: the restart policy's restarts since the container was
+  created or last started by hand. It is a running total, not a rate, so a high restart_count alone
+  is NOT evidence of a crash loop: a container that restarted many times
+  in a past incident and is now up and healthy is fine. Only crash_looping (which Leela sets from
+  restarts since the last scan, a "restarting" state or a very short uptime) means it is looping.
 - Container status "not running" with a clean exit (e.g. "Exited (0) ...") and crash_looping is
   NOT set: this is very likely an intentional one-shot/cron job (e.g. a notifier container that
   runs once and exits 0), not a failure. Do not create a finding for these unless the same

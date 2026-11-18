@@ -9,6 +9,8 @@
     cgroup-tree         systemd: a Delegate=yes drop-in; MOS: a boot script on the data pool
     workspace-root      where each session's own directory is made (Core owned, traversable)
     socket-root         the per-session socket directories' parent (Core owned, 0711)
+    socket-root-boot    systemd only: a tmpfiles.d entry that recreates socket-root at every boot (it defaults to /run, a
+                        tmpfs, and Core runs unprivileged so it cannot make it itself); on MOS the boot script does this
 
 Same discipline as `planet_express/setup/` (probe reads only; repair compares what it saw and refuses over
 anything that is not setup's; undo reverts from journaled evidence and refuses once the host has moved), written
@@ -51,6 +53,7 @@ SOURCE = Path(pe_launch.__file__)
 _SHELL_SAFE = re.compile(r"/[A-Za-z0-9._@+/-]*")
 _UNIX_NAME = re.compile(r"[a-z_][a-z0-9_-]{0,31}")
 UNIT_DROPIN = "/etc/systemd/system/casa-planetexpress.service.d/launcher.conf"
+TMPFILES_CONF = "/etc/tmpfiles.d/planetexpress-sessions.conf"
 _RUN_ENV = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 
 
@@ -101,6 +104,8 @@ class Paths:
     groupdel: str = "/usr/sbin/groupdel"
     gpasswd: str = "/usr/bin/gpasswd"
     unit_dropin: str = UNIT_DROPIN
+    tmpfiles_conf: str = TMPFILES_CONF             # systemd only: recreates sock_root at every boot
+    systemd_tmpfiles: str = "/usr/bin/systemd-tmpfiles"
     boot_script: str = "/mnt/data/pe/launcher-boot.sh"
     interpreter: str = "/usr/bin/python3"
     flavour: str = "systemd"                       # or "mos"
@@ -294,6 +299,11 @@ class Step:
         """(path, mode, uid, gid) of the one directory this step makes, or None."""
         return None
 
+    def earlier_versions(self) -> list[bytes]:
+        """Exact contents an earlier release of setup wrote to `owned_file()`'s path: still setup's own, so removal takes
+        them away too (and `restore` puts back exactly what was removed)."""
+        return []
+
     def removal(self) -> tuple[str | None, str]:
         """(what removal would take away, why nothing otherwise). Never anything that is not exactly what setup writes:
         a file with other content, or a directory with anything in it, stays. A symlink where a file belongs is an error."""
@@ -303,7 +313,7 @@ class Step:
             current = read_regular(path)
             if current is None:
                 return None, f"{path}: already absent"
-            if current != data:
+            if current != data and current not in self.earlier_versions():
                 return None, f"{path}: left in place, it is not what setup writes"
             return path, ""
         directory = self.owned_dir()
@@ -326,7 +336,8 @@ class Step:
             return why
         file = self.owned_file()
         if file is not None:
-            _, data, mode = file
+            _, _, mode = file
+            data = read_regular(path)          # what is there (the current or an earlier version), so restore puts it back
             journal.append("evidence", step=self.name, data={"removed": {"kind": "file", "path": path, "mode": mode,
                                                                           "content": data.decode("utf-8")}})
             os.unlink(path)
@@ -982,7 +993,9 @@ class SessionAccess(Step):
 class CgroupTree(Step):
     name = "cgroup-tree"
 
-    def wanted(self) -> tuple[str, bytes, int]:
+    def wanted(self, *, legacy: bool = False) -> tuple[str, bytes, int]:
+        """`legacy`: the MOS boot script as 4.2.0 and earlier wrote it (before it made sock_root), so uninstall still
+        recognises it as setup's own on a host that was upgraded without re-running setup."""
         if self.p.flavour == "systemd":
             body = ("# Managed by Planet Express (session launcher). Core owns a delegated cgroup subtree: it makes\n"
                     "# `core` and `sessions` inside it, moves itself into `core`, and one child per session goes below\n"
@@ -999,9 +1012,24 @@ class CgroupTree(Step):
                 f"set -e\nmkdir -p {q_parent} {q_sessions}\n"
                 "echo +pids > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true\n"
                 f"echo +pids > {q_control} 2>/dev/null || true\n")
+        if not legacy:
+            body += self._sock_root_install()
         if self.p.helper_store:
             body += self._helper_install()
         return self.p.boot_script, body.encode(), 0o700
+
+    def _sock_root_install(self) -> str:
+        """Make sock_root again (MOS root is RAM, so it is gone after every boot), as the socket-root step makes it: Core
+        owned, 0711. Only when nothing is there; an existing directory is left as it is (Core's preflight judges it), and
+        `chown -h` never follows a link put there in between. A failure is logged and never stops the script: the helper
+        install below must still run (inside `if !` the shell's -e does not apply)."""
+        q_sock, q_parent = shlex.quote(self.p.sock_root), shlex.quote(os.path.dirname(self.p.sock_root))
+        return (f"if [ ! -e {q_sock} ] && [ ! -L {q_sock} ]; then\n"
+                f"    if ! {{ mkdir -p {q_parent} && mkdir -m 0711 {q_sock} && "
+                f"chown -h {self.p.core_uid}:{self.p.core_gid} {q_sock}; }}; then\n"
+                f"        echo \"launcher-boot: could not make the session socket root \"{q_sock} >&2\n"
+                "    fi\n"
+                "fi\n")
 
     def _helper_install(self) -> str:
         """Put the helper back at its real path (MOS root is RAM). From the persistent copy only, only if every directory
@@ -1052,13 +1080,15 @@ class CgroupTree(Step):
             return f"missions.cgroup_root {self.p.cgroup_root} is not a directory below a cgroup v2 mount"
         return None
 
-    def _unsafe_for_shell(self) -> str | None:
+    def _unsafe_for_shell(self, *, keys: tuple[str, ...] = ("cgroup_root", "sock_root")) -> str | None:
         for path in (self.p.helper, self.p.helper_store):
             if self.p.flavour != "systemd" and path and not _SHELL_SAFE.fullmatch(path):
                 return f"{path!r} has characters that are not allowed in the MOS boot script"
-        if self.p.flavour != "systemd" and not _SHELL_SAFE.fullmatch(self.p.cgroup_root):
-            return (f"missions.cgroup_root {self.p.cgroup_root!r} has characters that are not allowed in the MOS boot "
-                    "script (letters, digits and . _ @ + / - only)")
+        for key in keys:
+            value = getattr(self.p, key)
+            if self.p.flavour != "systemd" and not _SHELL_SAFE.fullmatch(value):
+                return (f"missions.{key} {value!r} has characters that are not allowed in the MOS boot "
+                        "script (letters, digits and . _ @ + / - only)")
         return None
 
     def _file_state(self) -> Probe:
@@ -1101,10 +1131,18 @@ class CgroupTree(Step):
         return self.active() if state.ok else state
 
     def owned_file(self):
-        if self._unsafe_for_shell():
+        # Only for comparing what is there (CAS, removal): sock_root is quoted in the script anyway, so a value the probe
+        # blocks still names the exact bytes setup would write, and an install from before sock_root was in the script
+        # (`earlier_versions`) is still recognised and removable.
+        if self._unsafe_for_shell(keys=("cgroup_root",)):
             return None
         path, data, mode = self.wanted()
         return path, data, mode
+
+    def earlier_versions(self) -> list[bytes]:
+        if self.p.flavour == "systemd" or self._unsafe_for_shell(keys=("cgroup_root",)):
+            return []
+        return [self.wanted(legacy=True)[1]]
 
     def _reload_pending(self) -> bool:
         """systemd knows the drop-in changed but has not reloaded: a write whose `daemon-reload` failed or never ran."""
@@ -1229,6 +1267,117 @@ class SocketRoot(_CoreDir):
     name = "socket-root"
     attr = "sock_root"
     mode = 0o711          # Core makes each session's directory below it; the launcher hands that one to the session
+
+
+class SocketRootBoot(Step):
+    """systemd: sock_root defaults to /run/planetexpress-sessions, and /run is a tmpfs, so the directory socket-root makes
+    is gone after every reboot. Core runs unprivileged and cannot make it again, so without this the launcher preflight
+    fails at every boot and the host drops to proposal-only. A tmpfiles.d entry has systemd-tmpfiles make it (Core owned,
+    0711, never aged out) before services start. It is written whatever sock_root is: for a persistent path it is a
+    harmless re-assertion of what socket-root made. (MOS has no systemd: its boot script makes sock_root instead.)"""
+    name = "socket-root-boot"
+    ubuntu_only = True
+
+    def _unsafe(self) -> str | None:
+        # tmpfiles.d reads whitespace, quotes, backslashes and `%` specifiers in a path: allow none of them.
+        if not _SHELL_SAFE.fullmatch(self.p.sock_root):
+            return (f"missions.sock_root {self.p.sock_root!r} has characters that are not allowed in a tmpfiles.d entry "
+                    "(letters, digits and . _ @ + / - only)")
+        return None
+
+    def wanted(self) -> bytes:
+        return ("# Managed by Planet Express (session launcher): recreate the session socket root at every boot. /run is\n"
+                "# emptied on reboot and Core runs unprivileged, so it cannot make this itself.\n"
+                f"d {self.p.sock_root} 0711 {self.p.core_uid} {self.p.core_gid} -\n").encode()
+
+    def owned_file(self):
+        if self._unsafe():
+            return None
+        return self.p.tmpfiles_conf, self.wanted(), 0o644
+
+    def _socket_root(self) -> Probe:
+        """The entry is only ever written for the directory socket-root made and owns (Core, 0711): tmpfiles `d` re-owns
+        an existing directory at every boot, so it must never name one that is not already Core's (`/run`, `/`, ...), and
+        it must not be what makes the directory (that would be a directory no undo knows about)."""
+        return SocketRoot(self.p).probe()
+
+    def probe(self) -> Probe:
+        problem = self._unsafe()
+        if problem:
+            return Probe(False, problem, blocked=True)
+        root = self._socket_root()
+        if root.blocked:
+            return Probe(False, root.detail, blocked=True)
+        path = self.p.tmpfiles_conf
+        try:
+            current = read_regular(path)
+        except StepError as exc:
+            return Probe(False, str(exc), blocked=True)
+        if current is None:
+            return Probe(False, f"{path} is absent: {self.p.sock_root} would not survive a reboot")
+        if current != self.wanted():
+            return Probe(False, f"{path} differs from the launcher's socket root entry")
+        info = os.lstat(path)
+        if info.st_uid != self.p.owner_uid or stat.S_IMODE(info.st_mode) != 0o644:
+            return Probe(False, f"{path} must be owned by root with mode 0644")
+        return Probe(True, path)
+
+    def repair(self, journal) -> dict:
+        state = self.probe()
+        if state.blocked:
+            raise StepError(state.detail)
+        root = self._socket_root()
+        if not root.ok:
+            raise StepError(f"socket-root must be in place first: {root.detail}")
+        path, data = self.p.tmpfiles_conf, self.wanted()
+        previous = read_regular(path)
+        created: list[str] = []
+        if not state.ok:
+            created = self._make_parents(journal, os.path.dirname(path))
+            journal.append("evidence", step=self.name, data={
+                "previous_sha256": None if previous is None else sha256(previous), "previous": _text(previous),
+                "sha256": sha256(data), "created_dirs": created, "path": path})
+            write_atomic(path, data, 0o644, self.p.owner_uid, self.p.owner_gid)
+            if not self.probe().ok:
+                raise StepError(f"{path} was written but does not read back as intended")
+            try:
+                self._create()
+            except StepError:
+                # Rejected: take it back, so the step stays unsatisfied (a retry runs the check again) and nothing boot
+                # would choke on is left behind.
+                if previous is None:
+                    os.unlink(path)
+                else:
+                    write_atomic(path, previous, 0o644, self.p.owner_uid, self.p.owner_gid)
+                # The host is as it was: nothing of setup's is at the path any more, so undo must neither remove nor
+                # "restore" it (the directories made on the way stay recorded: this merges over the earlier evidence).
+                journal.append("evidence", step=self.name, data={"sha256": None, "previous": None,
+                                                                  "previous_sha256": None, "rolled_back": True})
+                raise
+        return {"sha256": sha256(data), "created_dirs": created, "path": path}
+
+    def _create(self) -> None:
+        """Apply the entry now, as boot will: proves systemd-tmpfiles accepts it. sock_root already exists, Core owned
+        0711, so this changes nothing on the host."""
+        try:
+            result = self.p.run([self.p.systemd_tmpfiles, "--create", self.p.tmpfiles_conf], stdin=subprocess.DEVNULL,
+                                capture_output=True, timeout=60, env=_RUN_ENV, check=False)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise StepError(f"{self.p.tmpfiles_conf} was written but `systemd-tmpfiles --create` could not run "
+                            f"({type(exc).__name__})") from None
+        if result.returncode != 0:
+            err = (result.stderr or b"").decode("utf-8", "replace").strip()[:300]
+            raise StepError(f"{self.p.tmpfiles_conf} was written but `systemd-tmpfiles --create` failed: {err}")
+
+    def undo(self, journal, evidence: dict) -> str:
+        path = self.p.tmpfiles_conf
+        detail = self._undo_file(path, evidence)
+        previous = evidence.get("previous")
+        if previous is not None and not os.path.exists(path):
+            write_atomic(path, previous.encode(), 0o644, self.p.owner_uid, self.p.owner_gid)
+            detail += " (the previous file was restored)"
+        self._undo_dirs(evidence)
+        return detail
 
 
 MAX_INCLUDE_DEPTH = 16
@@ -1476,7 +1625,7 @@ def launcher_steps(paths: Paths, *, include_retired: bool = False) -> list[Step]
     """The steps in dependency order, minus those that do not apply on this host's flavour. A retired step (`sudoers-readable`) is
     left out of new plans; `include_retired` finds it again, so a step an older plan applied can still be checked and undone."""
     steps = [SessionUidRange(paths), LauncherHelper(paths), HelperStore(paths), LauncherSudoers(paths), SessionAccess(paths),
-             SudoersReadable(paths), CgroupTree(paths), WorkspaceRoot(paths), SocketRoot(paths)]
+             SudoersReadable(paths), CgroupTree(paths), WorkspaceRoot(paths), SocketRoot(paths), SocketRootBoot(paths)]
     return [s for s in steps if s.applies() and (include_retired or not getattr(s, "retired", False))]
 
 

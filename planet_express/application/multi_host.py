@@ -199,7 +199,7 @@ class Fleet:
 def remote_summary(inventory: MultiHostConfig, hosts_file, *, wall=time.time) -> dict | None:
     """For the Overview tile: containers on the SSH hosts with a fresh reading, their problems by the same rule as the alerts and
     incidents (remote_health.container_issue), and how many hosts are not reading now."""
-    from planet_express.application.remote_health import container_issue
+    from planet_express.application.remote_health import _read_at, container_issue
     entries = [e for e in inventory.hosts if e.ssh]
     if not entries:
         return None
@@ -220,7 +220,7 @@ def remote_summary(inventory: MultiHostConfig, hosts_file, *, wall=time.time) ->
         rows = [c for c in raw if isinstance(c, dict) and isinstance(c.get("name"), str)]
         containers += len(rows)
         for c in rows:
-            issue, crash = container_issue(c, now)
+            issue, crash = container_issue(c, now, _read_at(records.get(entry.ssh)))
             problems += 1 if issue else 0
             # The Overview's dot buckets, as for this host's containers: a finished one-shot (exited 0) is "paused".
             cells.append("down" if crash or (issue and c.get("state") != "running") else "degraded" if issue
@@ -293,7 +293,7 @@ def local_card(record: dict | None, now: float, *, name: str, containers: int | 
 def remote_stacks(inventory: MultiHostConfig, hosts_file, *, wall=time.time) -> list[dict]:
     """The other hosts' containers grouped as Overview's stack cards: by Compose project, else one card per container. Only hosts
     reading now; worst first. Problems by the alerts' rule (remote_health.container_issue)."""
-    from planet_express.application.remote_health import container_issue
+    from planet_express.application.remote_health import _read_at, container_issue
     records, now, out = load_hosts_file(hosts_file), wall(), []
     for entry in inventory.hosts:
         if not (entry.ssh and entry.docker):
@@ -308,7 +308,7 @@ def remote_stacks(inventory: MultiHostConfig, hosts_file, *, wall=time.time) -> 
                 continue
             labels = c.get("labels") if isinstance(c.get("labels"), dict) else {}
             project = labels.get("com.docker.compose.project") or c["name"]
-            issue, crash = container_issue(c, now)
+            issue, crash = container_issue(c, now, _read_at(record))
             # The Overview's own words for a dot (crit / warn / idle / ok), so these cards read like this host's.
             level = ("crit" if crash or (issue and c.get("state") != "running") else "warn" if issue
                      else "idle" if c.get("state") == "exited" else "ok")

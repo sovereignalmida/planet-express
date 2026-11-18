@@ -231,8 +231,8 @@ def test_the_overview_summary_of_other_hosts_never_counts_an_unknown_host_as_zer
     path = tmp_path / "hosts.json"
     path.write_text(json.dumps({"hosts": [_record(990.0)]}))
     summary = remote_summary(inv, path, wall=lambda: 1000.0)
-    # radarr unhealthy with 3 restarts: crash-looping, down; sab exited 0: a finished one-shot
-    assert summary == {"hosts": 1, "unknown": 1, "containers": 2, "problems": 1, "cells": ["down", "paused"]}
+    # radarr unhealthy (its 3 lifetime restarts are not a loop on their own): degraded; sab exited 0: a finished one-shot
+    assert summary == {"hosts": 1, "unknown": 1, "containers": 2, "problems": 1, "cells": ["degraded", "paused"]}
     assert dashboard_data.remote_hosts_line(summary) == (
         "2 of these on 1 other host · 1 of them with a problem · 1 host not reading, not counted")
     assert remote_summary(_inventory({"name": "B", "link": "http://b"}), path) is None
@@ -397,16 +397,30 @@ def _health_file(tmp_path, containers, read_at=990.0, alias="casalab", name="CAS
 def test_the_remote_rules_are_leelas_rules_in_dockers_words():
     import casa_leela
     assert remote_health.CRASH_LOOP_RESTARTS == casa_leela.CRASH_LOOP_RESTART_THRESHOLD
-    issue = lambda **kw: remote_health.container_issue({"state": "running", "health": None, "restarts": 0, **kw})  # noqa: E731
+    assert remote_health.crash_loop_reason is casa_leela.crash_loop_reason       # one rule, not two copies
+    now = 1_800_000_000.0
+    started = lambda secs: datetime.fromtimestamp(now - secs, tz=timezone.utc).isoformat()   # noqa: E731
+    issue = lambda **kw: remote_health.container_issue(  # noqa: E731
+        {"state": "running", "health": None, "restarts": 0, "started": started(7200), **kw}, now)
     assert issue() == (None, False)
     assert issue(state="exited", exit_code=0) == (None, False)                       # a finished one-shot
     assert issue(state="exited", exit_code=137) == ("not running (exited 137)", False)
-    assert issue(state="restarting", restarts=1) == ("restarting", False)
+    assert issue(state="restarting", restarts=1) == ("crash-looping (restarting now, 1 restarts lifetime)", True)
     assert issue(state="dead") == ("dead", False)
     assert issue(health="unhealthy") == ("healthcheck failing", False)
-    assert issue(restarts=3) == ("crash-looping (restarted 3x)", True)
-    assert issue(health="unhealthy", restarts=4) == ("crash-looping (restarted 4x), healthcheck failing", True)
+    # Docker's count is lifetime: a high count with a long healthy uptime is not a loop (2026-11-18)
+    assert issue(restarts=92) == (None, False)
+    assert issue(restarts=3, started=started(120)) == ("crash-looping (restarted 3x lifetime, up only 120s)", True)
+    assert issue(restarts=1, started=started(30)) == ("crash-looping (restarted 1x lifetime, up only 30s)", True)
+    assert issue(health="unhealthy", restarts=4, started=started(120)) == (
+        "crash-looping (restarted 4x lifetime, up only 120s), healthcheck failing", True)
+    assert issue(health="unhealthy", restarts=4) == ("healthcheck failing", False)
     assert issue(state="exited", exit_code=1, restarts=9) == ("not running (exited 1)", False)   # stopped is not looping
+    assert issue(restarts=9, started=started(-300)) == (None, False)        # a start time ahead of our clock: no uptime
+    # judged at the reading's own time: an aging reading keeps its verdict (code review)
+    young = {"state": "running", "restarts": 4, "started": started(20)}
+    assert remote_health.container_issue(young, now + 660, read_at=now)[1] is True
+    assert remote_health.container_issue(young, now + 660)[1] is False
 
 
 def test_assess_judges_a_fresh_reading_only_and_names_the_host(tmp_path):
@@ -542,7 +556,7 @@ def test_a_stuck_start_and_a_never_started_container_are_problems_like_locally()
 
 def test_the_overview_counts_problems_by_the_alerts_rule(tmp_path):
     inv = _inventory({"name": "CASALAB", "ssh": "casalab"})
-    path = _health_file(tmp_path, [_container("a", state="exited", exit=1), _container("b", restarts=4), _container("c")])
+    path = _health_file(tmp_path, [_container("a", state="exited", exit=1), _container("b", state="restarting", restarts=4), _container("c")])
     assert remote_summary(inv, path, wall=lambda: 1000.0)["problems"] == 2
 
 

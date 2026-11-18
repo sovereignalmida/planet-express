@@ -29,6 +29,12 @@ import yaml
 
 import casa_stackctl as stackctl
 import config
+from planet_express.core.crash_loop import (  # noqa: F401  (the constants are part of Leela's surface)
+    CRASH_LOOP_MIN_UPTIME_SECONDS,
+    CRASH_LOOP_NO_BASELINE_UPTIME_SECONDS,
+    CRASH_LOOP_RESTART_THRESHOLD,
+    crash_loop_reason,
+)
 from planet_express.core.images import normalise_image
 
 log = logging.getLogger("planetexpress.leela")
@@ -50,13 +56,8 @@ def _run(cmd: str | list, timeout: int = 30, env: dict | None = None) -> tuple[i
 
 
 # ── Check functions ───────────────────────────────────────────────────────────
-# A container that has auto-restarted this many times (Docker's own RestartCount,
-# tracked under a restart policy) is crash-looping regardless of its current status.
-CRASH_LOOP_RESTART_THRESHOLD = 3
-# A container currently "Up" but younger than this AND with at least one restart is
-# also treated as crash-looping — catches loops on containers with no restart policy,
-# where something external (Bender, a human, docker compose) keeps re-starting it.
-CRASH_LOOP_MIN_UPTIME_SECONDS = 60
+# When a container is crash-looping: planet_express/core/crash_loop.py, one rule shared with the other
+# hosts (remote_health). Docker's RestartCount is not a rate, so it is never the signal on its own.
 # Docker's own "starting" health state is expected to last through the container's
 # configured start_period plus enough failing checks to hit its retry count (e.g.
 # TubeArchivist's 30s start_period + up to 3 retries at a 2m interval — ~6.5 minutes
@@ -182,6 +183,7 @@ def _inspect_restart_info(names: list[str]) -> dict[str, dict]:
         else:
             grace = DEFAULT_STARTING_GRACE_SECONDS
         info[name] = {
+            "state": state,
             "restart_count": int(restart_count_str) if restart_count_str.isdigit() else 0,
             "uptime_seconds": uptime_seconds,
             "starting_grace_seconds": grace,
@@ -193,6 +195,7 @@ def check_containers() -> list[dict]:
     """All containers — status, health, image. Flag anything not running or crash-looping."""
     fmt = (
         '{"name":"{{.Names}}",'
+        '"id":"{{.ID}}",'
         '"status":"{{.Status}}",'
         '"image":"{{.Image}}"}'
     )
@@ -226,20 +229,27 @@ def check_containers() -> list[dict]:
             log.warning(f"Skipping unparseable container line: {line!r}")
 
     restart_info = _inspect_restart_info([c["name"] for c in containers])
+    previous = _previous_restart_counts()
     for c in containers:
         info = restart_info.get(c["name"], {})
         restart_count = info.get("restart_count", 0)
         uptime_seconds = info.get("uptime_seconds")
         status = c["status"]
         health = c["health"]
-        c["restart_count"] = restart_count
+        c["restart_count"] = restart_count          # Docker's running total, not a rate: information only
+        # A failed or partial `docker inspect` leaves the count unknown (shown as 0): it is no baseline for the next
+        # scan, and no reading to compare against this one's.
+        read = "restart_count" in info
+        if not read:
+            c["restart_count_read"] = False
+        delta = _restarts_since_last_scan(c.get("id"), restart_count, previous.get(c["name"])) if read else None
+        c["restarts_since_last_scan"] = delta
 
-        crash_looping = restart_count >= CRASH_LOOP_RESTART_THRESHOLD or (
-            status.startswith("Up")
-            and restart_count >= 1
-            and uptime_seconds is not None
-            and uptime_seconds < CRASH_LOOP_MIN_UPTIME_SECONDS
+        loop_reason = crash_loop_reason(
+            state=info.get("state"), up=status.startswith("Up"), restart_count=restart_count,
+            delta=delta, uptime_seconds=uptime_seconds,
         )
+        crash_looping = loop_reason is not None
         if crash_looping:
             c["crash_looping"] = True
 
@@ -256,13 +266,44 @@ def check_containers() -> list[dict]:
                     f"(expected within ~{int(grace)}s)"
                 )
         if crash_looping:
-            issue = f"crash-looping (restarted {restart_count}x)" + (
-                f", {issue}" if issue else ""
-            )
+            issue = f"crash-looping ({loop_reason})" + (f", {issue}" if issue else "")
         if issue:
             c["issue"] = issue
 
     return containers
+
+
+def _previous_restart_counts() -> dict[str, dict]:
+    """{name: {"id", "restart_count"}} from the last saved snapshot's containers: the baseline for
+    restarts since the last scan. Anything missing or malformed is no baseline ({} or a skipped
+    entry), never an error: the no-baseline rule then applies."""
+    if not config.STATE_MONITOR.exists():
+        return {}
+    try:
+        prev = json.loads(config.STATE_MONITOR.read_text())
+        rows = prev.get("containers", []) if isinstance(prev, dict) else []
+        out = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict) or not isinstance(row.get("name"), str) or row.get("restart_count_read") is False:
+                continue
+            cid, count = row.get("id"), row.get("restart_count")
+            if isinstance(cid, str) and cid and isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                out[row["name"]] = {"id": cid, "restart_count": count}
+        return out
+    except Exception as e:  # noqa: BLE001
+        log.warning(f"Could not load previous snapshot for the restart baseline: {e}")
+        return {}
+
+
+def _restarts_since_last_scan(container_id, restart_count: int, previous: dict | None) -> int | None:
+    """Restarts since the previous snapshot, or None when there is no usable baseline. A different
+    container ID means it was recreated; a count lower than before means it was recreated or started
+    by hand (which resets Docker's count): no baseline either way."""
+    if not previous or not container_id or previous.get("id") != container_id:
+        return None
+    if restart_count < previous["restart_count"]:
+        return None
+    return restart_count - previous["restart_count"]
 
 
 def _previous_stack_completeness() -> dict[str, dict]:

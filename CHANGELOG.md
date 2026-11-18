@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Mission sessions survive a reboot.** `missions.sock_root` (default `/run/planetexpress-sessions`, on a tmpfs) was made
+  once by setup and nothing made it again, so after every reboot the launcher preflight failed and the host was
+  proposal-only until setup ran again. A new launcher step, `socket-root-boot`, writes
+  `/etc/tmpfiles.d/planetexpress-sessions.conf` on systemd hosts (journalled, reversible, removed by uninstall only if it is
+  exactly what setup wrote), and the MOS boot script now makes the directory too. The preflight's failure now says how to
+  fix it. Existing installs: run the launcher setup again as root, then restart `casa-planetexpress`.
+- **A healthy container is no longer "crash-looping" because of old restarts.** Leela judged a loop from Docker's
+  `RestartCount`, a running total that is not reset until the container is recreated or started by hand, so a container that
+  restarted a few times in one past incident stayed "crash-looping" (down on the dashboard, HIGH, blocking safe-prune) for as
+  long as it lived. One rule now (`planet_express/core/crash_loop.py`, for this host and the other hosts): a container is
+  crash-looping when Docker says it is restarting; when it restarted 3 or more times since the last scan (the snapshot records
+  each container's ID and count as the baseline, and a new ID or a lower count starts a new one); when it restarted and has been
+  up under a minute; or when its count is 3 or more, it has been up under 10 minutes, and it has no baseline or restarted since
+  the last scan. Other hosts have no baseline and are judged at the time of their reading. The count stays as information
+  ("(lifetime)" on the container page), and Hermes is told it is not evidence of a loop on its own.
+
 ## [4.2.0] - 2026-11-14
 
 Finishes reconciling Missions and Memory (`docs/designs/missions-memory.md`, releases 3 and 4).

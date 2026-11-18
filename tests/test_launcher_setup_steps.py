@@ -31,6 +31,7 @@ def paths(tmp_path, **over):
                 sock_root=str(tmp_path / "run" / "socks"), helper=str(tmp_path / "usr" / "libexec" / "pe" / "pe-launch"),
                 conf=str(tmp_path / "etc" / "pe" / "launch.conf"), sudoers=str(tmp_path / "etc" / "sudoers.d" / "pe"),
                 unit_dropin=str(tmp_path / "etc" / "systemd" / "launcher.conf"),
+                tmpfiles_conf=str(tmp_path / "etc" / "tmpfiles.d" / "planetexpress-sessions.conf"),
                 boot_script=str(tmp_path / "data" / "launcher-boot.sh"), interpreter="/usr/bin/python3",
                 owner_uid=ME, owner_gid=MY_GID, below=str(tmp_path), passwd=str(tmp_path / "passwd"), check_delegation=False,
                 group=str(tmp_path / "group"), run=visudo_ok, sudoers_main=str(tmp_path / "etc" / "sudoers"),
@@ -149,7 +150,7 @@ def by_name(steps):
 def test_the_steps_are_named_in_dependency_order(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path))]
     assert names == ["session-uid-range", "launcher-helper", "launcher-sudoers", "session-access",
-                     "cgroup-tree", "workspace-root", "socket-root"]
+                     "cgroup-tree", "workspace-root", "socket-root", "socket-root-boot"]
     # sudoers-readable is retired (trust mode removed the Repair gate it served): new plans leave it out, undo still finds it
     retired = [s.name for s in launcher_steps(paths(tmp_path), include_retired=True)]
     assert retired == [*names[:4], "sudoers-readable", *names[4:]]
@@ -158,6 +159,7 @@ def test_the_steps_are_named_in_dependency_order(tmp_path):
 def test_mos_has_no_sudoers_step(tmp_path):
     names = [s.name for s in launcher_steps(paths(tmp_path, flavour="mos"))]
     assert "launcher-sudoers" not in names and "sudoers-readable" not in names and "session-access" not in names
+    assert "socket-root-boot" not in names            # no tmpfiles.d on MOS: the boot script makes sock_root
     assert "cgroup-tree" in names
 
 
@@ -1035,3 +1037,216 @@ def test_the_session_uid_range_step_accepts_pes_own_accounts_but_not_a_lookalike
     assert not by_name(launcher_steps(p))["session-uid-range"].probe().blocked
     Path(p.passwd).write_text(Path(p.passwd).read_text() + "pe-s61020:x:61001:61001::/:/bin/sh\n")
     assert by_name(launcher_steps(p))["session-uid-range"].probe().blocked
+
+
+# ── sock_root after a reboot: /run is a tmpfs and Core cannot make it again (socket-root-boot) ─────────
+
+def socket_root_boot(p):
+    """socket-root in place (the step before), and the step under test."""
+    steps = by_name(launcher_steps(p))
+    steps["socket-root"].repair(MemoryJournal())
+    return steps["socket-root-boot"]
+
+
+def test_socket_root_boot_writes_a_tmpfiles_entry_for_the_socket_root_and_applies_it(tmp_path):
+    visudo_ok.calls.clear()
+    p = paths(tmp_path)
+    step = socket_root_boot(p)
+    assert not step.probe().ok and "would not survive a reboot" in step.probe().detail
+    step.repair(MemoryJournal())
+    conf = Path(p.tmpfiles_conf)
+    lines = [line for line in conf.read_text().splitlines() if not line.startswith("#")]
+    assert lines == [f"d {p.sock_root} 0711 {ME} {MY_GID} -"]
+    assert oct(conf.stat().st_mode & 0o777) == "0o644"
+    assert [p.systemd_tmpfiles, "--create", p.tmpfiles_conf] in visudo_ok.calls
+    assert step.probe().ok
+
+
+def test_the_default_socket_root_gets_its_entry(tmp_path):
+    p = paths(tmp_path, sock_root="/run/planetexpress-sessions")
+    assert by_name(launcher_steps(p))["socket-root-boot"].wanted().decode().endswith(
+        f"\nd /run/planetexpress-sessions 0711 {ME} {MY_GID} -\n")
+
+
+def test_a_missing_or_changed_tmpfiles_entry_is_not_satisfied(tmp_path):
+    p = paths(tmp_path)
+    step = socket_root_boot(p)
+    step.repair(MemoryJournal())
+    Path(p.tmpfiles_conf).write_text(f"d {p.sock_root} 0777 0 0 -\n")
+    assert not step.probe().ok and "differs" in step.probe().detail
+    Path(p.tmpfiles_conf).unlink()
+    assert not step.probe().ok and "absent" in step.probe().detail
+
+
+def test_an_entry_for_another_core_uid_is_not_satisfied(tmp_path):
+    p = paths(tmp_path)
+    socket_root_boot(p).repair(MemoryJournal())
+    moved = paths(tmp_path, core_uid=ME + 1)
+    assert not by_name(launcher_steps(moved))["socket-root-boot"].probe().ok
+
+
+def test_it_is_never_what_makes_the_socket_root(tmp_path):
+    """Directories tmpfiles made would be unjournaled: the step refuses until socket-root has made (and recorded) it."""
+    p = paths(tmp_path)
+    step = by_name(launcher_steps(p))["socket-root-boot"]
+    with pytest.raises(StepError, match="socket-root must be in place first"):
+        step.repair(MemoryJournal())
+    assert not Path(p.tmpfiles_conf).exists()
+
+
+@pytest.mark.parametrize("target", ["etc", ""])
+def test_it_never_names_a_directory_that_is_not_cores_own(tmp_path, target):
+    """tmpfiles `d` re-owns an existing directory at every boot: an existing directory that is not Core's 0711 one
+    (`/run`, `/etc`, `/` on a real host) blocks the step and nothing is written."""
+    existing = tmp_path / target if target else tmp_path
+    p = paths(tmp_path, sock_root=str(existing))
+    step = by_name(launcher_steps(p))["socket-root-boot"]
+    assert step.probe().blocked
+    with pytest.raises(StepError):
+        step.repair(MemoryJournal())
+    assert not Path(p.tmpfiles_conf).exists()
+
+
+@pytest.mark.parametrize("evil", ["/run/a b", "/run/%h", "/run/x\nd /etc 0777 0 0 -", '/run/"q"', "/run/a\\b"])
+def test_a_sock_root_tmpfiles_cannot_express_blocks_the_step_and_writes_nothing(tmp_path, evil):
+    p = paths(tmp_path, sock_root=evil)
+    step = by_name(launcher_steps(p))["socket-root-boot"]
+    assert step.probe().blocked and "tmpfiles.d" in step.probe().detail
+    assert step.owned_file() is None
+    with pytest.raises(StepError):
+        step.repair(MemoryJournal())
+    assert not Path(p.tmpfiles_conf).exists()
+
+
+def tmpfiles_rejects(argv, **kw):
+    if argv[0].endswith("systemd-tmpfiles"):
+        return subprocess.CompletedProcess(argv, 1, b"", b"bad line")
+    return visudo_ok(argv, **kw)
+
+
+def test_an_entry_systemd_tmpfiles_rejects_is_taken_back_so_a_retry_checks_again(tmp_path):
+    p = paths(tmp_path, run=tmpfiles_rejects)
+    step = socket_root_boot(p)
+    journal = MemoryJournal()
+    with pytest.raises(StepError, match="systemd-tmpfiles"):
+        step.repair(journal)
+    assert not Path(p.tmpfiles_conf).exists()
+    assert not step.probe().ok                          # not "already in place": the next run tries (and checks) again
+    step.undo(journal, journal.evidence("socket-root-boot"))     # and undo has nothing left to take
+    assert not Path(p.tmpfiles_conf).exists()
+
+
+def test_a_rejected_entry_puts_back_the_file_that_was_there(tmp_path):
+    p = paths(tmp_path, run=tmpfiles_rejects)
+    step = socket_root_boot(p)
+    conf = Path(p.tmpfiles_conf)
+    conf.parent.mkdir(parents=True)
+    conf.write_bytes(b"d /run/old 0700 0 0 -\n")
+    journal = MemoryJournal()
+    with pytest.raises(StepError):
+        step.repair(journal)
+    assert conf.read_bytes() == b"d /run/old 0700 0 0 -\n"
+    # undo afterwards sees nothing of setup's at the path: it neither refuses nor touches the operator's file (Codex)
+    step.undo(journal, journal.evidence("socket-root-boot"))
+    assert conf.read_bytes() == b"d /run/old 0700 0 0 -\n"
+
+
+def test_undo_removes_only_the_entry_setup_wrote_and_restores_what_was_there(tmp_path):
+    p = paths(tmp_path)
+    step = socket_root_boot(p)
+    conf = Path(p.tmpfiles_conf)
+    conf.parent.mkdir(parents=True)
+    conf.write_text("d /run/old 0700 0 0 -\n")
+    journal = MemoryJournal()
+    step.repair(journal)
+    assert "previous file was restored" in step.undo(journal, journal.evidence("socket-root-boot"))
+    assert conf.read_text() == "d /run/old 0700 0 0 -\n"
+    # an entry changed after setup wrote it is left alone
+    journal = MemoryJournal()
+    conf.unlink()
+    step.repair(journal)
+    conf.write_text("d /run/edited 0711 0 0 -\n")
+    with pytest.raises(StepRefused):
+        step.undo(journal, journal.evidence("socket-root-boot"))
+    assert conf.exists()
+
+
+def test_undo_all_and_uninstall_take_the_tmpfiles_entry_away(tmp_path):
+    p = paths(tmp_path)
+    steps = launcher_steps(p)
+    journal = MemoryJournal()
+    repair_all(steps, journal)
+    undo_all(steps, journal)
+    assert not Path(p.tmpfiles_conf).exists() and not Path(p.sock_root).exists()
+    repair_all(steps, MemoryJournal())
+    gone = MemoryJournal()
+    assert by_name(steps)["socket-root-boot"].remove(gone).endswith("removed")
+    assert not Path(p.tmpfiles_conf).exists()
+    by_name(steps)["socket-root-boot"].restore(gone.evidence("socket-root-boot"))
+    assert by_name(steps)["socket-root-boot"].probe().ok
+
+
+def test_the_mos_boot_script_makes_the_socket_root_again_without_following_a_link(tmp_path):
+    p = paths(tmp_path, flavour="mos", sock_root="/run/planetexpress-sessions")
+    script = by_name(launcher_steps(p))["cgroup-tree"].wanted()[1].decode()
+    assert ("if [ ! -e /run/planetexpress-sessions ] && [ ! -L /run/planetexpress-sessions ]; then\n"
+            "    if ! { mkdir -p /run && mkdir -m 0711 /run/planetexpress-sessions && "
+            f"chown -h {ME}:{MY_GID} /run/planetexpress-sessions; }}; then\n") in script
+
+
+@pytest.mark.parametrize("evil", ["/run/x;touch /tmp/pwned", "/run/$(id)", "/run/a b", "/run/`id`"])
+def test_a_sock_root_with_shell_metacharacters_blocks_the_mos_step(tmp_path, evil):
+    p = paths(tmp_path, flavour="mos", sock_root=evil)
+    step = by_name(launcher_steps(p))["cgroup-tree"]
+    assert step.probe().blocked and "sock_root" in step.probe().detail
+    with pytest.raises(StepError):
+        step.repair(MemoryJournal())
+    assert not Path(p.boot_script).exists()
+
+
+def test_the_mos_boot_script_really_makes_the_socket_root(tmp_path):
+    """Run the generated lines with sh against the throwaway tree (chown to our own ids works unprivileged)."""
+    sock = tmp_path / "volatile" / "socks"
+    p = paths(tmp_path, flavour="mos", sock_root=str(sock))
+    snippet = by_name(launcher_steps(p))["cgroup-tree"]._sock_root_install()
+    subprocess.run(["/bin/sh", "-ec", snippet], check=True)
+    assert sock.is_dir() and oct(sock.stat().st_mode & 0o7777) == "0o711"
+    subprocess.run(["/bin/sh", "-ec", snippet], check=True)       # a second boot with it already there changes nothing
+
+
+def test_a_socket_root_the_mos_boot_script_cannot_make_never_stops_the_rest_of_it(tmp_path):
+    """The helper install comes after: a failure here is logged and the script carries on."""
+    (tmp_path / "afile").write_text("")
+    p = paths(tmp_path, flavour="mos", sock_root=str(tmp_path / "afile" / "socks"))
+    snippet = by_name(launcher_steps(p))["cgroup-tree"]._sock_root_install() + "echo carried-on\n"
+    out = subprocess.run(["/bin/sh", "-ec", snippet], capture_output=True, text=True)
+    assert out.returncode == 0 and "carried-on" in out.stdout and "could not make the session socket root" in out.stderr
+
+
+def test_a_sock_root_the_script_cannot_hold_still_leaves_setups_boot_script_removable(tmp_path):
+    p = paths(tmp_path, flavour="mos", sock_root="/run/odd name")
+    step = by_name(launcher_steps(p))["cgroup-tree"]
+    assert step.probe().blocked
+    path, old, mode = step.wanted(legacy=True)
+    Path(path).parent.mkdir(parents=True)
+    Path(path).parent.chmod(0o755)
+    Path(path).write_bytes(old)
+    assert step.removal()[0] == path
+
+
+def test_uninstall_still_takes_away_the_boot_script_an_earlier_release_wrote(tmp_path):
+    """A MOS host set up on 4.2.0 (boot script without the sock_root block) and upgraded without re-running setup."""
+    p = paths(tmp_path, flavour="mos")
+    step = by_name(launcher_steps(p))["cgroup-tree"]
+    path, old, mode = step.wanted(legacy=True)
+    Path(path).parent.mkdir(parents=True)
+    Path(path).parent.chmod(0o755)
+    Path(path).write_bytes(old)
+    Path(path).chmod(mode)
+    assert not step.probe().ok and "differs" in step.probe().detail      # needs the upgrade
+    gone = MemoryJournal()
+    assert step.remove(gone).endswith("removed") and not Path(path).exists()
+    step.restore(gone.evidence("cgroup-tree"))
+    assert Path(path).read_bytes() == old                # restore puts back exactly what was removed
+    Path(path).write_bytes(old + b"# edited\n")
+    assert step.removal()[0] is None                     # anything else still stays
